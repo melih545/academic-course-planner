@@ -1,5 +1,4 @@
-regex==2024.9.11
-pandas==2.2.2  # Replace with the version you're using, if known
-streamlit==1.41.1  # Replace with the version you're using, if known
-pyscipopt==5.2.1  # Replace with the version you're using, if known
-matplotlib==3.10.0  # Replace with the version you're using, if known
+pandas>=2.2,<3
+streamlit>=1.41,<2
+pyscipopt>=5.2,<6
+matplotlib>=3.10,<4
