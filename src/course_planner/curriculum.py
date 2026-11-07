@@ -126,6 +126,14 @@ class Course:
 
 
 @dataclass(frozen=True)
+class RequirementProgress:
+    category: str
+    completed: int
+    planned: int
+    remaining: int
+
+
+@dataclass(frozen=True)
 class Curriculum:
     courses: Mapping[str, Course]
 
@@ -161,3 +169,23 @@ class Curriculum:
             for category, minimum in ELECTIVE_MINIMUMS.items()
             if category in categories
         }
+
+    def progress(
+        self, completed: Set[str], planned: Set[str]
+    ) -> tuple[RequirementProgress, ...]:
+        all_required = self.remaining_required(set())
+        completed_required = self.remaining_required(completed)
+        remaining_required = self.remaining_required(completed | planned)
+        rows = [RequirementProgress(
+            "Required courses",
+            len(all_required - completed_required),
+            len(completed_required - remaining_required),
+            len(remaining_required),
+        )]
+        remaining_electives = self.elective_deficits(completed | planned)
+        for category, deficit in self.elective_deficits(completed).items():
+            remaining = remaining_electives[category]
+            rows.append(RequirementProgress(
+                category, ELECTIVE_MINIMUMS[category] - deficit, deficit - remaining, remaining
+            ))
+        return tuple(rows)

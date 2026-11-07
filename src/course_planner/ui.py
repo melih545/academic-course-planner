@@ -66,6 +66,25 @@ def main() -> None:
         st.info("Select completed courses and planning dates, then calculate schedule options.")
         return
 
+    completed_grades = session.request.completed_grades
+    progress = curriculum.progress(set(completed_grades), session.confirmed_codes)
+    remaining_count = sum(row.remaining for row in progress)
+    st.subheader("Graduation Progress")
+    status_col, remaining_col = st.columns(2)
+    status_col.metric(
+        "Current Grade Level", calculate_current_grade_level(course_plan, completed_grades)
+    )
+    remaining_col.metric("Remaining Required Courses and Electives", remaining_count)
+    st.table([
+        {
+            "Requirement": row.category,
+            "Completed": row.completed,
+            "Confirmed in plan": row.planned,
+            "Remaining": row.remaining,
+        }
+        for row in progress
+    ])
+
     if session.confirmed:
         st.subheader("Confirmed Schedules")
     for confirmed in session.confirmed:
@@ -76,17 +95,6 @@ def main() -> None:
         else:
             st.write(f"No courses selected for {confirmed.term}.")
 
-    completed_grades = session.request.completed_grades
-    accounted_codes = set(completed_grades) | session.confirmed_codes
-    remaining_count = len(curriculum.remaining_required(accounted_codes)) + sum(
-        curriculum.elective_deficits(accounted_codes).values()
-    )
-
-    status_col, remaining_col = st.columns(2)
-    status_col.metric(
-        "Current Grade Level", calculate_current_grade_level(course_plan, completed_grades)
-    )
-    remaining_col.metric("Remaining Required Courses and Electives", remaining_count)
     if not remaining_count:
         st.success("All remaining curriculum requirements have been scheduled or completed.")
         return
