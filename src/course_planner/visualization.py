@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from math import ceil, floor
 
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
@@ -16,7 +17,12 @@ def visualize_schedule(
     title: str = "Schedule",
 ) -> None:
     figure, axis = plt.subplots(figsize=(10, 6))
-    times = range(DISPLAY_START_HOUR, DISPLAY_END_HOUR)
+    meetings = [meeting for selected in selected_sections for meeting in selected.section.meetings]
+    start_hour = min((floor(meeting.start_minute / 60) for meeting in meetings), default=DISPLAY_START_HOUR)
+    end_hour = max((ceil(meeting.end_minute / 60) for meeting in meetings), default=DISPLAY_END_HOUR)
+    start_hour = min(start_hour, DISPLAY_START_HOUR)
+    end_hour = max(end_hour, 16)
+    times = range(start_hour, end_hour + 1)
     axis.set_xticks(range(len(WEEKDAYS)), WEEKDAYS)
     axis.set_yticks(range(len(times)), [f"{hour}:00" for hour in times])
 
@@ -25,11 +31,11 @@ def visualize_schedule(
         label = f"{section.code}\n{course_labels[section.code]}\n{section.instructor}"
         for meeting in section.meetings:
             day_index = DAY_MAP[meeting.day]
-            y_position = meeting.start_minute / 60 - DISPLAY_START_HOUR
+            y_position = meeting.start_minute / 60 - start_hour
             height = (meeting.end_minute - meeting.start_minute) / 60
-            axis.add_patch(patches.Rectangle((day_index, y_position), 0.8, height, color="orange", alpha=0.6))
+            axis.add_patch(patches.Rectangle((day_index - 0.4, y_position), 0.8, height, color="orange", alpha=0.6))
             axis.text(
-                day_index + 0.4,
+                day_index,
                 y_position + height / 2,
                 label,
                 ha="center",
@@ -39,7 +45,7 @@ def visualize_schedule(
             )
 
     axis.set_xlim(-0.5, len(WEEKDAYS) - 0.5)
-    axis.set_ylim(DISPLAY_END_HOUR - DISPLAY_START_HOUR, 0)
+    axis.set_ylim(end_hour - start_hour, 0)
     axis.set_ylabel("Time")
     axis.set_title(title)
     axis.grid(True)

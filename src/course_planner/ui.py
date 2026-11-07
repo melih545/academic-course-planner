@@ -253,18 +253,22 @@ def render_schedule_options(
 ) -> None:
     current_term = session.current_term
     term_options = [[section for section in plan if section.term == current_term] for plan in options]
-    for number, sections in enumerate(term_options, start=1):
-        st.subheader(f"Option {number}")
-        if not sections:
-            st.write("No courses scheduled for this term.")
-            continue
-
-        codes = sorted(section.code for section in sections)
-        st.write("Courses:", ", ".join(f"{code} - {course_labels[code]}" for code in codes))
-        for category in ("ITB", "Elective Analytic", "Elective Functional", "Main"):
-            count = sum(curriculum.courses[code].category == category for code in codes)
-            st.write(f"{category} Courses: {count}")
-        visualize_schedule(sections, course_labels, title=f"Option {number} Schedule")
+    st.subheader("Compare Schedule Options")
+    st.caption("Compare full paths below. Confirming an option saves only the current term.")
+    choice_ids = range(len(options))
+    for side, column in enumerate(st.columns(min(2, len(options)))):
+        with column:
+            if len(options) == 1:
+                choice = 0
+            else:
+                choice = st.selectbox(
+                    f"Option to compare ({'left' if side == 0 else 'right'})",
+                    options=choice_ids,
+                    index=side,
+                    format_func=lambda index: f"Option {index + 1}",
+                    key=f"compare_{current_term}_{side}",
+                )
+            show_option(options[choice], current_term, curriculum, course_labels)
 
     selected_option = st.radio(
         "Select your preferred schedule",
@@ -279,3 +283,31 @@ def render_schedule_options(
         st.session_state.planner = session.confirm(term_options[selected_option])
         st.session_state.result = None
         st.rerun()
+
+
+def show_option(
+    option: list[ScheduledSection],
+    current_term: Term,
+    curriculum: Curriculum,
+    course_labels: dict[str, str],
+) -> None:
+    by_term = {}
+    for section in option:
+        by_term.setdefault(section.term, []).append(section)
+    current = by_term.get(current_term, [])
+    if current:
+        visualize_schedule(current, course_labels, title=f"Weekly schedule for {current_term}")
+    else:
+        st.info("No courses scheduled for this term.")
+    if by_term:
+        st.table([
+            {
+                "Term": str(term),
+                "Courses": ", ".join(sorted(section.code for section in sections)),
+                "Electives": sum(
+                    curriculum.courses[section.code].category in ELECTIVE_MINIMUMS
+                    for section in sections
+                ),
+            }
+            for term, sections in by_term.items()
+        ])

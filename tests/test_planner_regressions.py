@@ -189,6 +189,9 @@ def test_default_calculate_explains_why_the_plan_cannot_be_built():
 def test_calculate_and_confirm_a_feasible_plan_with_bundled_data():
     app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30).run()
     next(button for button in app.button if button.label == "Load example plan").click().run()
+    selectors = [widget for widget in app.selectbox if widget.label.startswith("Option to compare")]
+    assert len(selectors) == 2
+    assert selectors[0].value != selectors[1].value
     spring = app.session_state.planner.request.start
     assert app.button[-1].label == f"Confirm {spring}"
     for _ in range(3):
