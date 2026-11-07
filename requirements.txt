@@ -1,4 +1,0 @@
-pandas>=2.2,<3
-streamlit>=1.41,<2
-pyscipopt>=5.2,<6
-matplotlib>=3.10,<4

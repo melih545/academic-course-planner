@@ -1,6 +1,12 @@
 import pytest
 
-from course_planner.schedule import PlanningSession, PlanRequest, ScheduledSection, Section, Term
+from course_planner.schedule import (
+    PlanningSession,
+    PlanRequest,
+    ScheduledSection,
+    Section,
+    Term,
+)
 
 
 def test_confirming_a_term_advances_a_new_session_and_retains_its_courses():

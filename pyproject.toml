@@ -7,7 +7,7 @@ name = "course-planner"
 version = "0.1.0"
 description = "A Streamlit-based course planning app built around historical schedule data."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 license = { file = "LICENSE" }
 authors = [{ name = "Melih" }]
 dependencies = [
@@ -17,8 +17,8 @@ dependencies = [
     "streamlit>=1.41,<2",
 ]
 
-[project.optional-dependencies]
-dev = ["pytest>=8.3,<9"]
+[dependency-groups]
+dev = ["pytest>=8.3,<9", "ruff>=0.17,<0.18"]
 
 [tool.setuptools]
 package-dir = { "" = "src" }
@@ -28,3 +28,6 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

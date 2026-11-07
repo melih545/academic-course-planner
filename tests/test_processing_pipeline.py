@@ -6,7 +6,6 @@ import pandas as pd
 
 from course_planner.preprocessing import process_uploaded_files
 
-
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
 

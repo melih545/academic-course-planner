@@ -12,7 +12,7 @@ Course Planner is a Streamlit application that builds semester-by-semester sched
 
 ## Tech Stack
 
-- Python 3.12+
+- Python 3.12
 - Streamlit for the UI
 - pandas for preprocessing
 - matplotlib for schedule visualization
@@ -34,33 +34,24 @@ course_planner/
 │       ├── ui.py
 │       └── visualization.py
 ├── tests/
-│   ├── fixtures/
-│   ├── conftest.py
-│   ├── test_preprocessing.py
-│   └── test_processing_pipeline.py
 ├── pyproject.toml
-└── requirements.txt
+└── uv.lock
 ```
 
 ## Getting Started
 
-Install runtime dependencies:
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and run these commands from the repository root.
 
 ```bash
-pip install -r requirements.txt
+uv sync --locked
+uv run --locked streamlit run app.py
 ```
 
-Run the app:
+Run the same lint and test checks as CI.
 
 ```bash
-streamlit run app.py
-```
-
-For development and tests:
-
-```bash
-pip install -e .[dev]
-pytest
+uv run --locked ruff check .
+uv run --locked pytest -q
 ```
 
 ## Data Files

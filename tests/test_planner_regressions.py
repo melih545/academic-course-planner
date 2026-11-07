@@ -8,7 +8,6 @@ from course_planner.curriculum import Curriculum
 from course_planner.optimization import generate_schedule_options
 from course_planner.schedule import Meeting, PlanRequest, Section, Term
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 

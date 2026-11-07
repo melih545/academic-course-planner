@@ -15,9 +15,7 @@ from .curriculum import (
     UnresolvedPrerequisite,
     can_satisfy,
 )
-
 from .schedule import PlanRequest, ScheduledSection, Section
-
 
 SOLVE_BUDGET_SECONDS = 8.0
 

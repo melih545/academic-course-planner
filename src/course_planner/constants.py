@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 GRADE_CREDITS = {1: 30, 2: 60, 3: 95}
 SEMESTER_LST = ["Spring", "Summer", "Fall"]
 

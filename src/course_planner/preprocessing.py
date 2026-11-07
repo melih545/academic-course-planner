@@ -8,7 +8,6 @@ import pandas as pd
 from .constants import DAY_MAP
 from .schedule import Meeting, Section
 
-
 _TIME_RANGE = re.compile(r"(?:[01]\d|2[0-3])[0-5]\d/(?:[01]\d|2[0-3])[0-5]\d")
 
 

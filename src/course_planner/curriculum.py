@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-
 GRADE_ORDER = ("FF", "FD", "DD", "DC", "CC", "CB", "BB", "BA", "AA")
 ELECTIVE_MINIMUMS = {"Elective Analytic": 4, "Elective Functional": 4, "ITB": 1}
 
