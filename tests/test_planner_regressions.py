@@ -5,6 +5,7 @@ from streamlit.testing.v1 import AppTest
 
 from course_planner.curriculum import Curriculum
 from course_planner.optimization import generate_schedule_options
+from course_planner.schedule import Meeting, PlanRequest, Section, Term
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,9 +24,17 @@ def meeting(code, section_id, day="Pazartesi", term="Spring", start=9.0, end=10.
 
 def plan(rows, courses, completed=None, end_term="Spring", **kwargs):
     catalog = pd.DataFrame(courses, columns=["Course Code", "Type", "Prerequisites"])
+    sections = {}
+    for row in rows:
+        key = (row["SectionId"], row["Code"], row["Term"])
+        sections.setdefault(key, []).append(
+            Meeting(row["Days"], round(row["StartTimeFloat"] * 60), round(row["EndTimeFloat"] * 60))
+        )
     return generate_schedule_options(
-        pd.DataFrame(rows), completed or {}, 2026, "Spring", 2026, end_term,
-        curriculum=Curriculum.from_frame(catalog), **kwargs,
+        [Section(*key, tuple(meetings)) for key, meetings in sections.items()],
+        PlanRequest(Term(2026, "Spring"), Term(2026, end_term), completed or {}),
+        curriculum=Curriculum.from_frame(catalog),
+        **kwargs,
     )
 
 
@@ -43,11 +52,11 @@ def test_conflict_with_second_section_meeting_rules_out_the_section():
 
     rows.append(meeting("END 101E", 102, day="Çarşamba"))
     result = plan(rows, courses)
-    assert [{section.section_id for section in option} for option in result.options] == [{102, 201}]
+    assert [{section.section.id for section in option} for option in result.options] == [{102, 201}]
 
     rows[2]["StartTimeFloat"] = 10.0
     result = plan(rows, courses)
-    assert {101, 201} in [{section.section_id for section in option} for option in result.options]
+    assert {101, 201} in [{section.section.id for section in option} for option in result.options]
 
 
 def test_unavailable_prerequisite_blocks_the_dependent_course():
@@ -82,7 +91,7 @@ def test_prerequisites_are_scheduled_in_an_earlier_term():
 
     result = plan(rows, courses, end_term="Summer")
 
-    assert [(section.code, section.term) for section in result.options[0]] == [
+    assert [(section.code, section.term.season) for section in result.options[0]] == [
         ("BIL 100E", "Spring"), ("END 201E", "Summer"),
     ]
     rows[0]["Term"] = "Summer"
@@ -172,10 +181,9 @@ def test_calculate_and_confirm_a_feasible_plan_with_bundled_data():
 
     assert not app.exception
     assert app.success
-    assert [section.code for section in app.session_state.path["2024_Spring"]] == ["MAT 103E"]
+    assert [section.code for section in app.session_state.planner.confirmed[0].sections] == ["MAT 103E"]
     assert [
         section.code
-        for term, sections in app.session_state.path.items()
-        if term != "2024_Spring"
-        for section in sections
+        for confirmed in app.session_state.planner.confirmed[1:]
+        for section in confirmed.sections
     ] == ["MAT 104E"]

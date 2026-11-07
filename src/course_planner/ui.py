@@ -1,18 +1,15 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import pandas as pd
 import streamlit as st
 
 from .constants import ALL_LECTURES_PATH, COURSE_PLANS_PATH, GRADE_CREDITS, SEMESTER_LST
 from .curriculum import Curriculum, minimum_grades
-from .optimization import (
-    PlanResult,
-    ScheduledSection,
-    advance_term,
-    generate_schedule_options,
-    semester_position,
-)
-from .preprocessing import process_uploaded_files
+from .optimization import PlanResult, generate_schedule_options
+from .preprocessing import process_uploaded_files, sections_from_frame
+from .schedule import PlanningSession, PlanRequest, ScheduledSection, Section, Term
 from .visualization import visualize_schedule
 
 
@@ -22,9 +19,9 @@ def load_course_plan(path: str) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def load_processed_schedule_data(lectures_path: str, course_plan_path: str) -> pd.DataFrame:
+def load_sections(lectures_path: str, course_plan_path: str) -> tuple[Section, ...]:
     course_plan = pd.read_csv(course_plan_path)
-    return process_uploaded_files(lectures_path, course_plan)
+    return sections_from_frame(process_uploaded_files(lectures_path, course_plan))
 
 
 def main() -> None:
@@ -34,10 +31,8 @@ def main() -> None:
         "Generate semester-by-semester schedule options from bundled course history and curriculum data."
     )
 
-    initialize_session_state()
-
     course_plan = load_course_plan(str(COURSE_PLANS_PATH))
-    processed_data = load_processed_schedule_data(
+    sections = load_sections(
         str(ALL_LECTURES_PATH),
         str(COURSE_PLANS_PATH),
     )
@@ -56,27 +51,29 @@ def main() -> None:
     for grade in grades:
         course_labels.setdefault(grade.code, "External prerequisite")
     higher_grade_options = sorted({grade.code for grade in grades if grade.grade == "BB"})
-    render_configuration_form(course_labels, higher_grade_options)
+    session: PlanningSession | None = st.session_state.get("planner")
+    request = render_configuration_form(course_labels, higher_grade_options, session)
+    if request is not None:
+        st.session_state.planner = PlanningSession(request)
+        st.session_state.result = None
+        st.rerun()
 
-    if not st.session_state.calculated:
+    if session is None:
         st.info("Select completed courses and planning dates, then calculate schedule options.")
         return
 
-    if st.session_state.path:
+    if session.confirmed:
         st.subheader("Confirmed Schedules")
-    for term, sections in st.session_state.path.items():
-        if sections:
+    for confirmed in session.confirmed:
+        if confirmed.sections:
             visualize_schedule(
-                processed_data, sections, title=f"Selected schedule for {term.replace('_', ' ')}"
+                confirmed.sections, course_labels, title=f"Selected schedule for {confirmed.term}"
             )
         else:
-            st.write(f"No courses selected for {term.replace('_', ' ')}.")
+            st.write(f"No courses selected for {confirmed.term}.")
 
-    confirmed_codes = {
-        section.code for sections in st.session_state.path.values() for section in sections
-    }
-    completed_grades = st.session_state.completed_grades
-    accounted_codes = set(completed_grades) | confirmed_codes
+    completed_grades = session.request.completed_grades
+    accounted_codes = set(completed_grades) | session.confirmed_codes
     remaining_count = len(curriculum.remaining_required(accounted_codes)) + sum(
         curriculum.elective_deficits(accounted_codes).values()
     )
@@ -90,9 +87,8 @@ def main() -> None:
         st.success("All remaining curriculum requirements have been scheduled or completed.")
         return
 
-    current_term = (st.session_state.current_year, st.session_state.current_semester)
-    last_term = (st.session_state.last_year, st.session_state.last_semester)
-    if semester_position(*current_term) > semester_position(*last_term):
+    current_term = session.current_term
+    if current_term.position > session.request.end.position:
         st.warning("The planning window has ended with outstanding curriculum requirements.")
         return
 
@@ -100,61 +96,40 @@ def main() -> None:
         with st.spinner("Generating schedule options..."):
             try:
                 st.session_state.result = generate_schedule_options(
-                    processed_data,
-                    completed_grades,
-                    *current_term,
-                    *last_term,
+                    sections,
+                    PlanRequest(current_term, session.request.end, completed_grades),
                     curriculum=curriculum,
-                    confirmed_courses=confirmed_codes,
+                    confirmed_courses=session.confirmed_codes,
                 )
             except RuntimeError as error:
                 st.error(str(error))
                 return
     result: PlanResult = st.session_state.result
-    st.subheader(f"Planning for {current_term[0]} {current_term[1]}")
+    st.subheader(f"Planning for {current_term}")
     if result.issues:
         issues = "\n".join(f"- {issue}" for issue in result.issues)
         st.warning(f"No feasible schedule was found.\n\n{issues}")
         return
 
     st.caption("Prerequisites scheduled in earlier terms are conditional on earning their minimum grades.")
-    render_schedule_options(course_labels, curriculum, processed_data, result.options)
-
-
-def initialize_session_state() -> None:
-    if "completed_grades" not in st.session_state:
-        st.session_state.completed_grades = {}
-    if "current_year" not in st.session_state:
-        st.session_state.current_year = 2024
-    if "current_semester" not in st.session_state:
-        st.session_state.current_semester = SEMESTER_LST[0]
-    if "last_year" not in st.session_state:
-        st.session_state.last_year = 2024
-    if "last_semester" not in st.session_state:
-        st.session_state.last_semester = SEMESTER_LST[0]
-    if "path" not in st.session_state:
-        st.session_state.path = {}
-    if "result" not in st.session_state:
-        st.session_state.result = None
-    if "calculated" not in st.session_state:
-        st.session_state.calculated = False
+    render_schedule_options(course_labels, curriculum, session, result.options)
 
 
 def render_configuration_form(
-    course_labels: dict[str, str], higher_grade_options: list[str]
-) -> None:
-    max_year = max(2034, st.session_state.current_year, st.session_state.last_year) + 1
-    available_years = list(range(2024, max_year + 1))
-    current_year_index = available_years.index(st.session_state.current_year)
-    current_semester_index = SEMESTER_LST.index(st.session_state.current_semester)
-    default_last_year = max(st.session_state.current_year, st.session_state.last_year)
-    last_semester_index = SEMESTER_LST.index(st.session_state.last_semester)
+    course_labels: dict[str, str],
+    higher_grade_options: list[str],
+    session: PlanningSession | None,
+) -> PlanRequest | None:
+    start = session.request.start if session else Term(2024, "Spring")
+    end = session.request.end if session else start
+    completed = session.request.completed_grades if session else {}
+    available_years = list(range(2024, max(2034, end.year) + 2))
 
     with st.form("planner_controls"):
         selected_completed_courses = st.multiselect(
             "Select completed courses",
             options=sorted(course_labels),
-            default=list(st.session_state.completed_grades),
+            default=list(completed),
             help="Selected courses count as DD or higher unless marked BB or higher below.",
             format_func=lambda code: f"{code} - {course_labels.get(code, code)}",
         )
@@ -164,7 +139,7 @@ def render_configuration_form(
             options=higher_grade_options,
             default=[
                 code for code in higher_grade_options
-                if st.session_state.completed_grades.get(code) == "BB"
+                if completed.get(code) == "BB"
             ],
             format_func=lambda code: f"{code} - {course_labels[code]}",
         )
@@ -174,32 +149,27 @@ def render_configuration_form(
             current_year = st.selectbox(
                 "Select the current year",
                 options=available_years,
-                index=current_year_index,
+                index=available_years.index(start.year),
             )
         with col2:
             current_semester = st.selectbox(
                 "Select the current semester",
                 options=SEMESTER_LST,
-                index=current_semester_index,
+                index=SEMESTER_LST.index(start.season),
             )
-
-        adjusted_last_year_options = list(range(current_year, max_year + 1))
-        if default_last_year not in adjusted_last_year_options:
-            default_last_year = current_year
-        adjusted_last_year_index = adjusted_last_year_options.index(default_last_year)
 
         col1, col2 = st.columns(2)
         with col1:
             last_year = st.selectbox(
                 "Select the year you want to finish",
-                options=adjusted_last_year_options,
-                index=adjusted_last_year_index,
+                options=available_years,
+                index=available_years.index(end.year),
             )
         with col2:
             last_semester = st.selectbox(
                 "Select the last semester you attended",
                 options=SEMESTER_LST,
-                index=last_semester_index,
+                index=SEMESTER_LST.index(end.season),
             )
 
         submitted = st.form_submit_button("Calculate")
@@ -207,32 +177,25 @@ def render_configuration_form(
     if not submitted:
         return
 
-    if semester_position(last_year, last_semester) < semester_position(
-        current_year, current_semester
-    ):
-        st.error("The finish semester must not be earlier than the current semester.")
-        return
-
     if set(completed_with_bb) - set(selected_completed_courses):
         st.error("Select each BB-or-higher course in the completed courses list as well.")
         return
 
-    st.session_state.completed_grades = {
+    completed = {
         code: "BB" if code in completed_with_bb else "DD"
         for code in selected_completed_courses
     }
-    st.session_state.current_year = current_year
-    st.session_state.current_semester = current_semester
-    st.session_state.last_year = last_year
-    st.session_state.last_semester = last_semester
-    st.session_state.path = {}
-    st.session_state.result = None
-    st.session_state.calculated = True
-    st.rerun()
+    try:
+        return PlanRequest(
+            Term(current_year, current_semester), Term(last_year, last_semester), completed
+        )
+    except ValueError as error:
+        st.error(str(error))
+        return None
 
 
 def calculate_current_grade_level(
-    course_plan: pd.DataFrame, completed_grades: dict[str, str]
+    course_plan: pd.DataFrame, completed_grades: Mapping[str, str]
 ) -> int:
     completed_credits = pd.to_numeric(
         course_plan.drop_duplicates("Course Code")
@@ -253,18 +216,11 @@ def calculate_current_grade_level(
 def render_schedule_options(
     course_labels: dict[str, str],
     curriculum: Curriculum,
-    data: pd.DataFrame,
+    session: PlanningSession,
     options: list[list[ScheduledSection]],
 ) -> None:
-    current_year = st.session_state.current_year
-    current_semester = st.session_state.current_semester
-    term_options = [
-        [
-            section for section in plan
-            if (section.year, section.term) == (current_year, current_semester)
-        ]
-        for plan in options
-    ]
+    current_term = session.current_term
+    term_options = [[section for section in plan if section.term == current_term] for plan in options]
     for number, sections in enumerate(term_options, start=1):
         st.subheader(f"Option {number}")
         if not sections:
@@ -276,21 +232,18 @@ def render_schedule_options(
         for category in ("ITB", "Elective Analytic", "Elective Functional", "Main"):
             count = sum(curriculum.courses[code].category == category for code in codes)
             st.write(f"{category} Courses: {count}")
-        visualize_schedule(data, sections, title=f"Option {number} Schedule")
+        visualize_schedule(sections, course_labels, title=f"Option {number} Schedule")
 
     selected_option = st.radio(
         "Select your preferred schedule",
         options=range(len(term_options)),
         format_func=lambda index: f"Option {index + 1}",
-        key=f"radio_{current_year}_{current_semester}",
+        key=f"radio_{current_term}",
     )
     if st.button(
-        f"Confirm {current_year} {current_semester}",
-        key=f"confirm_{current_year}_{current_semester}",
+        f"Confirm {current_term}",
+        key=f"confirm_{current_term}",
     ):
-        st.session_state.path[f"{current_year}_{current_semester}"] = term_options[selected_option]
-        st.session_state.current_year, st.session_state.current_semester = advance_term(
-            current_year, current_semester
-        )
+        st.session_state.planner = session.confirm(term_options[selected_option])
         st.session_state.result = None
         st.rerun()

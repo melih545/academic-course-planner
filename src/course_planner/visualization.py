@@ -1,65 +1,48 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
-import pandas as pd
 import streamlit as st
 
 from .constants import DAY_MAP, DISPLAY_END_HOUR, DISPLAY_START_HOUR, WEEKDAYS
-from .optimization import ScheduledSection
+from .schedule import ScheduledSection
 
 
 def visualize_schedule(
-    data: pd.DataFrame, selected_sections: list[ScheduledSection], title: str = "Schedule"
+    selected_sections: Sequence[ScheduledSection],
+    course_labels: Mapping[str, str],
+    title: str = "Schedule",
 ) -> None:
-    section_ids = {section.section_id for section in selected_sections}
-    plot_data = data[data["SectionId"].isin(section_ids)].copy()
-    plot_data["DayIndex"] = plot_data["Days"].map(DAY_MAP)
-
     figure, axis = plt.subplots(figsize=(10, 6))
     times = range(DISPLAY_START_HOUR, DISPLAY_END_HOUR)
+    axis.set_xticks(range(len(WEEKDAYS)), WEEKDAYS)
+    axis.set_yticks(range(len(times)), [f"{hour}:00" for hour in times])
 
-    axis.set_xticks(range(len(WEEKDAYS)))
-    axis.set_xticklabels(WEEKDAYS)
-    axis.set_yticks(range(len(times)))
-    axis.set_yticklabels([f"{hour}:00" for hour in times])
-
-    for _, row in plot_data.iterrows():
-        if pd.isna(row["DayIndex"]) or pd.isna(row["StartTimeFloat"]):
-            continue
-
-        try:
-            y_position = row["StartTimeFloat"] - DISPLAY_START_HOUR
-            height = row["EndTimeFloat"] - row["StartTimeFloat"]
-            if height <= 0:
-                continue
-
-            rectangle = patches.Rectangle(
-                (row["DayIndex"], y_position),
-                0.8,
-                height,
-                color="orange",
-                alpha=0.6,
-            )
-            axis.add_patch(rectangle)
+    for selected in selected_sections:
+        section = selected.section
+        label = f"{section.code}\n{course_labels[section.code]}\n{section.instructor}"
+        for meeting in section.meetings:
+            day_index = DAY_MAP[meeting.day]
+            y_position = meeting.start_minute / 60 - DISPLAY_START_HOUR
+            height = (meeting.end_minute - meeting.start_minute) / 60
+            axis.add_patch(patches.Rectangle((day_index, y_position), 0.8, height, color="orange", alpha=0.6))
             axis.text(
-                row["DayIndex"] + 0.4,
+                day_index + 0.4,
                 y_position + height / 2,
-                f"{row['Code']}\n{row['CourseName']}\n{row['Instructors']}",
+                label,
                 ha="center",
                 va="center",
                 fontsize=8,
                 wrap=True,
             )
-        except Exception as error:  # pragma: no cover - Streamlit warning path.
-            st.warning(f"Skipping invalid row: {row['Code']} (Error: {error})")
 
     axis.set_xlim(-0.5, len(WEEKDAYS) - 0.5)
-    axis.set_ylim(0, DISPLAY_END_HOUR - DISPLAY_START_HOUR)
-    axis.set_xlabel("Days")
+    axis.set_ylim(DISPLAY_END_HOUR - DISPLAY_START_HOUR, 0)
     axis.set_ylabel("Time")
     axis.set_title(title)
     axis.grid(True)
-    plt.tight_layout()
+    figure.tight_layout()
     st.pyplot(figure)
     plt.close(figure)

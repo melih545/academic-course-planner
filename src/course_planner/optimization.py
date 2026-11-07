@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Callable, Mapping, Set
+from collections.abc import Callable, Sequence, Set
 from dataclasses import dataclass
 
-import pandas as pd
-
-from .constants import MAX_SOLUTIONS, SEMESTER_LST
+from .constants import MAX_SOLUTIONS
 from .curriculum import (
     AnyOf,
     Curriculum,
@@ -16,18 +14,12 @@ from .curriculum import (
     can_satisfy,
 )
 
+from .schedule import PlanRequest, ScheduledSection, Section
+
 try:
     from pyscipopt import Expr, Model, quicksum
 except ModuleNotFoundError:
     Model = None
-
-
-@dataclass(frozen=True)
-class ScheduledSection:
-    code: str
-    year: int
-    term: str
-    section_id: int
 
 
 @dataclass
@@ -36,43 +28,9 @@ class PlanResult:
     issues: tuple[str, ...] = ()
 
 
-def semester_position(year: int, term: str) -> tuple[int, int]:
-    return year, SEMESTER_LST.index(term)
-
-
-def build_planning_terms(
-    start_year: int, start_term: str, end_year: int, end_term: str
-) -> list[tuple[int, str]]:
-    if semester_position(end_year, end_term) < semester_position(start_year, start_term):
-        raise ValueError("End semester must not be earlier than the current semester.")
-
-    terms: list[tuple[int, str]] = []
-    start_position = semester_position(start_year, start_term)
-    end_position = semester_position(end_year, end_term)
-
-    for year in range(start_year, end_year + 1):
-        for term in SEMESTER_LST:
-            position = semester_position(year, term)
-            if start_position <= position <= end_position:
-                terms.append((year, term))
-
-    return terms
-
-
-def advance_term(year: int, term: str) -> tuple[int, str]:
-    current_index = SEMESTER_LST.index(term)
-    next_index = (current_index + 1) % len(SEMESTER_LST)
-    next_year = year + 1 if term == "Fall" else year
-    return next_year, SEMESTER_LST[next_index]
-
-
 def generate_schedule_options(
-    data: pd.DataFrame,
-    completed_grades: Mapping[str, str],
-    start_year: int,
-    start_term: str,
-    end_year: int,
-    end_term: str,
+    sections: Sequence[Section],
+    request: PlanRequest,
     max_solutions: int = MAX_SOLUTIONS,
     *,
     curriculum: Curriculum,
@@ -85,41 +43,39 @@ def generate_schedule_options(
     if max_solutions < 1:
         raise ValueError("At least one schedule option must be requested.")
 
-    terms = build_planning_terms(start_year, start_term, end_year, end_term)
+    terms = request.terms()
+    completed_grades = request.completed_grades
     completed_codes = set(completed_grades) | confirmed_courses
     required = curriculum.remaining_required(completed_codes)
     deficits = curriculum.elective_deficits(completed_codes)
 
     sections_by_season = defaultdict(list)
-    if not data.empty:
-        for section_id, code, season in data[
-            ["SectionId", "Code", "Term"]
-        ].drop_duplicates().itertuples(index=False, name=None):
-            if code in curriculum.courses and code not in completed_codes:
-                sections_by_season[season].append((code, section_id))
+    for section in sections:
+        if section.code in curriculum.courses and section.code not in completed_codes:
+            sections_by_season[section.season].append(section)
 
     # A course can be a prerequisite only after an earlier term. This pass
     # checks optimistic reachability before asking SCIP to resolve conflicts.
     prior_codes = set(confirmed_courses)
     offered = set()
     candidates_by_term = {}
-    for year, season in terms:
-        sections = sections_by_season[season]
-        offered.update(code for code, _ in sections)
+    for term in terms:
+        offered_sections = sections_by_season[term.season]
+        offered.update(section.code for section in offered_sections)
         candidates = [
-            ScheduledSection(code, year, season, section_id)
-            for code, section_id in sections
+            ScheduledSection(section, term)
+            for section in offered_sections
             if can_satisfy(
-                curriculum.courses[code].prerequisite,
+                curriculum.courses[section.code].prerequisite,
                 lambda rule: rule.code in prior_codes or rule.is_met_by(completed_grades),
             )
         ]
-        candidates_by_term[year, season] = candidates
+        candidates_by_term[term] = candidates
         prior_codes.update(section.code for section in candidates)
 
     eligible = prior_codes - confirmed_courses
     courses_with_sections = {
-        code for sections in sections_by_season.values() for code, _ in sections
+        section.code for season in sections_by_season.values() for section in season
     }
     issues = [
         f"{code}: no eligible section in the selected planning window."
@@ -154,7 +110,7 @@ def generate_schedule_options(
     model = Model("Course_Planner")
     model.hideOutput()
     section_vars = {
-        section: model.addVar(vtype="B", name=f"Section_{section.year}_{section.section_id}")
+        section: model.addVar(vtype="B", name=f"Section_{section.term.year}_{section.section.id}")
         for candidates in candidates_by_term.values()
         for section in candidates
     }
@@ -177,15 +133,15 @@ def generate_schedule_options(
                 ) >= deficit
             )
 
-    conflicts = _section_conflicts(data)
+    conflicts = _section_conflicts(sections)
     used_terms = {}
     prior_vars = defaultdict(list)
-    for (year, season), candidates in candidates_by_term.items():
-        used = model.addVar(vtype="B", name=f"Use_{year}_{season}")
-        used_terms[year, season] = used
-        term_vars = {section.section_id: section_vars[section] for section in candidates}
+    for term, candidates in candidates_by_term.items():
+        used = model.addVar(vtype="B", name=f"Use_{term.year}_{term.season}")
+        used_terms[term] = used
+        term_vars = {section.section.id: section_vars[section] for section in candidates}
         model.addCons(quicksum(term_vars.values()) <= 10 * used)
-        for first, second in conflicts[season]:
+        for first, second in conflicts[term.season]:
             if first in term_vars and second in term_vars:
                 model.addCons(term_vars[first] + term_vars[second] <= 1)
 
@@ -206,7 +162,7 @@ def generate_schedule_options(
             prior_vars[code].extend(variables)
 
     for index, (left, right) in enumerate(zip(terms, terms[1:])):
-        if left[1] == "Summer" and index > 0:
+        if left.season == "Summer" and index > 0:
             left = terms[index - 1]
         model.addCons(used_terms[left] >= used_terms[right])
     model.setObjective(
@@ -278,21 +234,22 @@ def _rule_support(
     return satisfied
 
 
-def _section_conflicts(data: pd.DataFrame) -> dict[str, set[tuple[int, int]]]:
+def _section_conflicts(sections: Sequence[Section]) -> dict[str, set[tuple[int, int]]]:
+    meetings_by_day = defaultdict(list)
+    for section in sections:
+        for meeting in section.meetings:
+            meetings_by_day[section.season, meeting.day].append((meeting, section))
+
     conflicts = defaultdict(set)
-    columns = ["SectionId", "Code", "StartTimeFloat", "EndTimeFloat"]
-    for (season, _), meetings in data.groupby(["Term", "Days"]):
+    for (season, _), meetings in meetings_by_day.items():
         active = []
-        for section_id, code, start, end in (
-            meetings.sort_values("StartTimeFloat")[columns].itertuples(index=False, name=None)
-        ):
+        for meeting, section in sorted(meetings, key=lambda pair: pair[0].start_minute):
             active = [
-                (other_id, other_code, stop)
-                for other_id, other_code, stop in active
-                if stop > start
+                (end, other) for end, other in active
+                if end > meeting.start_minute
             ]
-            for other_id, other_code, _ in active:
-                if other_code != code:
-                    conflicts[season].add(tuple(sorted((section_id, other_id))))
-            active.append((section_id, code, end))
+            for _, other in active:
+                if other.code != section.code:
+                    conflicts[season].add(tuple(sorted((section.id, other.id))))
+            active.append((meeting.end_minute, section))
     return conflicts

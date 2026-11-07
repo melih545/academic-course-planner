@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from .constants import DAY_MAP
+from .schedule import Meeting, Section
 
 
 _TIME_RANGE = re.compile(r"(?:[01]\d|2[0-3])[0-5]\d/(?:[01]\d|2[0-3])[0-5]\d")
@@ -207,3 +208,22 @@ def process_uploaded_files(
             representatives[key] = (first["Year"], section_id)
     selected_ids = {section_id for _, section_id in representatives.values()}
     return expanded_data[expanded_data["SectionId"].isin(selected_ids)].reset_index(drop=True)
+
+
+def sections_from_frame(data: pd.DataFrame) -> tuple[Section, ...]:
+    sections = []
+    for section_id, rows in data.groupby("SectionId", sort=False):
+        first = rows.iloc[0]
+        meetings = tuple(
+            Meeting(day, round(start * 60), round(end * 60), "" if pd.isna(room) else str(room))
+            for day, start, end, room in rows[
+                ["Days", "StartTimeFloat", "EndTimeFloat", "Building"]
+            ].itertuples(index=False, name=None)
+            if pd.notna(day)
+        )
+        instructor = first["Instructors"]
+        sections.append(Section(
+            int(section_id), first["Code"], first["Term"], meetings,
+            "" if pd.isna(instructor) or instructor == "--" else str(instructor),
+        ))
+    return tuple(sections)
