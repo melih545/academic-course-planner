@@ -27,7 +27,7 @@ def test_process_uploaded_files_keeps_expected_columns_and_split_rows() -> None:
         "Pazartesi",
         "Salı",
     ]
-    assert processed.loc[processed["Code"] == "END 201E", "Prerequisites"].iloc[0] == "END 101E"
+    assert processed.loc[processed["Code"] == "END 201E", "Prerequisites"].iloc[0] == "MIN DD END 101E"
     first_course = processed.loc[processed["Code"] == "END 101E"]
     assert first_course["SectionId"].nunique() == 1
     assert first_course["CRN"].tolist() == [10002, 10002]

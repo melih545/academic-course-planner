@@ -1,21 +1,39 @@
 from __future__ import annotations
 
-from itertools import combinations
-from typing import Any
+from collections import defaultdict
+from collections.abc import Callable, Mapping, Set
+from dataclasses import dataclass
 
 import pandas as pd
 
 from .constants import MAX_SOLUTIONS, SEMESTER_LST
-from .preprocessing import check_conflict
+from .curriculum import (
+    AnyOf,
+    Curriculum,
+    MinimumGrade,
+    Prerequisite,
+    UnresolvedPrerequisite,
+    can_satisfy,
+)
 
 try:
-    from pyscipopt import Model
-except ModuleNotFoundError:  # pragma: no cover - exercised through UI smoke test.
+    from pyscipopt import Expr, Model, quicksum
+except ModuleNotFoundError:
     Model = None
 
 
-CourseRecord = dict[str, Any]
-ScheduleOption = list[list[Any]]
+@dataclass(frozen=True)
+class ScheduledSection:
+    code: str
+    year: int
+    term: str
+    section_id: int
+
+
+@dataclass
+class PlanResult:
+    options: list[list[ScheduledSection]]
+    issues: tuple[str, ...] = ()
 
 
 def semester_position(year: int, term: str) -> tuple[int, int]:
@@ -50,238 +68,231 @@ def advance_term(year: int, term: str) -> tuple[int, str]:
 
 def generate_schedule_options(
     data: pd.DataFrame,
-    completed_courses: list[str],
+    completed_grades: Mapping[str, str],
     start_year: int,
     start_term: str,
     end_year: int,
     end_term: str,
     max_solutions: int = MAX_SOLUTIONS,
-) -> list[ScheduleOption]:
+    *,
+    curriculum: Curriculum,
+    confirmed_courses: Set[str] = frozenset(),
+) -> PlanResult:
     if Model is None:
         raise RuntimeError(
             "PySCIPOpt is not installed. Install project dependencies before running the planner."
         )
+    if max_solutions < 1:
+        raise ValueError("At least one schedule option must be requested.")
 
-    if data.empty:
-        return []
+    terms = build_planning_terms(start_year, start_term, end_year, end_term)
+    completed_codes = set(completed_grades) | confirmed_courses
+    required = curriculum.remaining_required(completed_codes)
+    deficits = curriculum.elective_deficits(completed_codes)
 
-    planning_terms = build_planning_terms(
-        start_year, start_term, end_year, end_term
+    sections_by_season = defaultdict(list)
+    if not data.empty:
+        for section_id, code, season in data[
+            ["SectionId", "Code", "Term"]
+        ].drop_duplicates().itertuples(index=False, name=None):
+            if code in curriculum.courses and code not in completed_codes:
+                sections_by_season[season].append((code, section_id))
+
+    # A course can be a prerequisite only after an earlier term. This pass
+    # checks optimistic reachability before asking SCIP to resolve conflicts.
+    prior_codes = set(confirmed_courses)
+    offered = set()
+    candidates_by_term = {}
+    for year, season in terms:
+        sections = sections_by_season[season]
+        offered.update(code for code, _ in sections)
+        candidates = [
+            ScheduledSection(code, year, season, section_id)
+            for code, section_id in sections
+            if can_satisfy(
+                curriculum.courses[code].prerequisite,
+                lambda rule: rule.code in prior_codes or rule.is_met_by(completed_grades),
+            )
+        ]
+        candidates_by_term[year, season] = candidates
+        prior_codes.update(section.code for section in candidates)
+
+    eligible = prior_codes - confirmed_courses
+    courses_with_sections = {
+        code for sections in sections_by_season.values() for code, _ in sections
+    }
+    issues = [
+        f"{code}: no eligible section in the selected planning window."
+        for code in sorted(required - offered)
+        if code in courses_with_sections
+    ]
+    issues.extend(
+        f"{code}: no eligible section in the bundled course history."
+        for code in sorted(required - courses_with_sections)
     )
-    completed_course_set = set(completed_courses)
+    issues.extend(
+        _prerequisite_issue(curriculum, code)
+        for code in sorted((required & offered) - eligible)
+    )
+    for category, deficit in deficits.items():
+        available = {code for code in eligible if curriculum.courses[code].category == category}
+        if len(available) < deficit:
+            issues.append(
+                f"{category}: {deficit} more required, but only {len(available)} "
+                "can be scheduled in this window."
+            )
+            issues.extend(
+                _prerequisite_issue(curriculum, code)
+                for code in sorted(offered - eligible)
+                if curriculum.courses[code].category == category
+            )
+    if issues:
+        return PlanResult([], tuple(issues))
+    if not required and not any(deficits.values()):
+        return PlanResult([[]])
 
     model = Model("Course_Planner")
-    records: list[CourseRecord] = data.to_dict("records")
-
-    course_rows_by_code: dict[str, list[CourseRecord]] = {}
-    for row in records:
-        course_rows_by_code.setdefault(row["Code"], []).append(row)
-
-    course_vars = {
-        _course_var_key(row, year): model.addVar(
-            vtype="B",
-            name=_course_var_name(row, year),
-        )
-        for row in records
-        for year, term in planning_terms
-        if row["Term"] == term
+    model.hideOutput()
+    section_vars = {
+        section: model.addVar(vtype="B", name=f"Section_{section.year}_{section.section_id}")
+        for candidates in candidates_by_term.values()
+        for section in candidates
     }
-
-    elective_types = (
-        data.loc[data["Type"].fillna("").str.contains("Elective"), "Type"]
-        .dropna()
-        .unique()
-    )
-    for elective_type in elective_types:
-        elective_keys = [
-            _course_var_key(row, year)
-            for row in records
-            if row["Type"] == elective_type
-            for year, term in planning_terms
-            if row["Term"] == term
-        ]
-        if elective_keys:
-            model.addCons(
-                sum(course_vars[key] for key in elective_keys) >= 4,
-                name=f"ElectiveCreditsConstraint_{elective_type.replace(' ', '_')}",
-            )
-
-    itb_keys = [
-        _course_var_key(row, year)
-        for row in records
-        if row["Type"] == "ITB"
-        for year, term in planning_terms
-        if row["Term"] == term
-    ]
-    if itb_keys:
-        model.addCons(sum(course_vars[key] for key in itb_keys) >= 1, name="ITBConstraint")
-
-    for course, rows in course_rows_by_code.items():
-        if course in completed_course_set:
-            continue
-
-        course_keys = [
-            _course_var_key(row, year)
-            for row in rows
-            for year, term in planning_terms
-            if row["Term"] == term
-        ]
-
-        course_type = str(rows[0].get("Type") or "")
-        is_elective = any(keyword in course_type for keyword in ("Elective", "ITB"))
-
-        if is_elective:
-            model.addCons(sum(course_vars[key] for key in course_keys) <= 1, name=f"Unique_{course}")
+    vars_by_code = defaultdict(list)
+    for section, variable in section_vars.items():
+        vars_by_code[section.code].append(variable)
+    for code, variables in vars_by_code.items():
+        if code in required:
+            model.addCons(quicksum(variables) == 1)
         else:
-            model.addCons(sum(course_vars[key] for key in course_keys) == 1, name=f"Unique_{course}")
-
-    for row1, row2 in combinations(records, 2):
-        if row1["Code"] == row2["Code"] or not check_conflict(row1, row2):
-            continue
-
-        for year, term in planning_terms:
-            if row1["Term"] != term:
-                continue
-
-            course1_key = _course_var_key(row1, year)
-            course2_key = _course_var_key(row2, year)
+            model.addCons(quicksum(variables) <= 1)
+    for category, deficit in deficits.items():
+        if deficit:
             model.addCons(
-                course_vars[course1_key] + course_vars[course2_key] <= 1,
-                name=(
-                    f"Conflict_{row1['Code']}_{row2['Code']}_{year}_{term}_"
-                    f"{row1['Days']}_{row1['StartTimeFloat']}_{row2['StartTimeFloat']}"
-                ),
+                quicksum(
+                    variable
+                    for code, variables in vars_by_code.items()
+                    if curriculum.courses[code].category == category
+                    for variable in variables
+                ) >= deficit
             )
 
-    prereq_map: dict[str, list[str]] = {}
-    for row in records:
-        prereq_text = row.get("Prerequisites")
-        if pd.notna(prereq_text) and prereq_text:
-            prereqs = [
-                prereq
-                for prereq in str(prereq_text).split(", ")
-                if prereq not in completed_course_set
-            ]
-            if prereqs:
-                prereq_map[row["Code"]] = prereqs
+    conflicts = _section_conflicts(data)
+    used_terms = {}
+    prior_vars = defaultdict(list)
+    for (year, season), candidates in candidates_by_term.items():
+        used = model.addVar(vtype="B", name=f"Use_{year}_{season}")
+        used_terms[year, season] = used
+        term_vars = {section.section_id: section_vars[section] for section in candidates}
+        model.addCons(quicksum(term_vars.values()) <= 10 * used)
+        for first, second in conflicts[season]:
+            if first in term_vars and second in term_vars:
+                model.addCons(term_vars[first] + term_vars[second] <= 1)
 
-    unique_codes = list(course_rows_by_code.keys())
-    term_vars = {
-        (course, year, term): model.addVar(
-            vtype="B",
-            name=f"Take_{course.replace(' ', '_')}_{year}_{term}_anytime",
-        )
-        for course in unique_codes
-        for year, term in planning_terms
-    }
+        def prior_support(rule: MinimumGrade) -> bool | Expr:
+            if rule.code in confirmed_courses or rule.is_met_by(completed_grades):
+                return True
+            variables = prior_vars.get(rule.code)
+            return quicksum(variables) if variables else False
 
-    for course, rows in course_rows_by_code.items():
-        for year, term in planning_terms:
-            matching_keys = [
-                _course_var_key(row, year) for row in rows if row["Term"] == term
-            ]
-            model.addCons(
-                sum(course_vars[key] for key in matching_keys) == term_vars[(course, year, term)],
-                name=f"Link_{course}_{year}_{term}",
-            )
+        vars_by_term_code = defaultdict(list)
+        for section in candidates:
+            vars_by_term_code[section.code].append(section_vars[section])
+        for code, variables in vars_by_term_code.items():
+            support = _rule_support(model, curriculum.courses[code].prerequisite, prior_support)
+            if support is not True:
+                model.addCons(quicksum(variables) <= support)
+        for code, variables in vars_by_term_code.items():
+            prior_vars[code].extend(variables)
 
-    for course, prereqs in prereq_map.items():
-        for prereq in prereqs:
-            if prereq not in course_rows_by_code:
-                continue
+    for index, (left, right) in enumerate(zip(terms, terms[1:])):
+        if left[1] == "Summer" and index > 0:
+            left = terms[index - 1]
+        model.addCons(used_terms[left] >= used_terms[right])
+    model.setObjective(
+        (len(curriculum.courses) + 1) * quicksum(used_terms.values())
+        + quicksum(section_vars.values()),
+        "minimize",
+    )
 
-            for year, term in planning_terms:
-                valid_prereq_terms = [
-                    term_vars[(prereq, prereq_year, prereq_term)]
-                    for prereq_year, prereq_term in planning_terms
-                    if semester_position(prereq_year, prereq_term)
-                    < semester_position(year, term)
-                ]
-
-                if valid_prereq_terms:
-                    model.addCons(
-                        term_vars[(course, year, term)] <= sum(valid_prereq_terms),
-                        name=f"Prerequisite_{course}_{prereq}_{year}_{term}",
-                    )
-                else:
-                    model.addCons(
-                        term_vars[(course, year, term)] == 0,
-                        name=f"Prerequisite_{course}_{prereq}_{year}_{term}_Invalid",
-                    )
-
-    semester_vars = {
-        (year, term): model.addVar(vtype="B", name=f"Use_{year}_{term}")
-        for year, term in planning_terms
-    }
-
-    for year, term in planning_terms:
-        semester_keys = [
-            _course_var_key(row, year) for row in records if row["Term"] == term
-        ]
-        model.addCons(
-            sum(course_vars[key] for key in semester_keys) <= semester_vars[(year, term)] * 10,
-            name=f"LinkCoursesToSemester_{year}_{term}",
-        )
-
-    model.setObjective(sum(semester_vars.values()), "minimize")
-
-    for index, current_term in enumerate(planning_terms[:-1]):
-        left_term = current_term
-        if current_term[1] == "Summer" and index > 0:
-            left_term = planning_terms[index - 1]
-
-        right_term = planning_terms[index + 1]
-        if left_term == right_term:
-            continue
-
-        model.addCons(
-            semester_vars[left_term] >= semester_vars[right_term],
-            name=f"NoGap_{left_term[0]}_{left_term[1]}_to_{right_term[0]}_{right_term[1]}",
-        )
-
-    paths: list[ScheduleOption] = []
-    model.optimize()
-
-    while model.getStatus() in {"optimal", "feasible"} and len(paths) < max_solutions:
-        solution = model.getBestSol()
-        current_schedule = [
-            [row["Code"], year, row["Term"], row["Days"], row["StartTimeFloat"]]
-            for row in records
-            for year, term in planning_terms
-            if row["Term"] == term
-            and model.getSolVal(solution, course_vars[_course_var_key(row, year)]) > 0.5
-        ]
-
-        if current_schedule not in paths:
-            paths.append(current_schedule)
-
-        model.freeTransform()
-        excluded_solution = [
-            course_vars[(code, year, term, day, start_time)]
-            for code, year, term, day, start_time in current_schedule
-        ]
-        if not excluded_solution:
-            break
-
-        model.addCons(sum(excluded_solution) <= len(current_schedule) - 1)
+    options = []
+    for index in range(max_solutions):
         model.optimize()
+        if model.getStatus() != "optimal":
+            break
+        solution = model.getBestSol()
+        selected = [
+            section for section, variable in section_vars.items()
+            if model.getSolVal(solution, variable) > 0.5
+        ]
+        options.append(selected)
+        if index + 1 == max_solutions:
+            break
+        model.freeTransform()
+        model.addCons(quicksum(section_vars[section] for section in selected) <= len(selected) - 1)
 
-    return paths
+    if not options:
+        return PlanResult([], (
+            "No feasible schedule fits the prerequisites, timetable conflicts, "
+            "elective requirements, and ten-course limit per term in this window.",
+        ))
+    return PlanResult(options)
 
 
-def _course_var_key(row: CourseRecord, year: int) -> tuple[str, int, str, str, float]:
-    return (
-        row["Code"],
-        year,
-        row["Term"],
-        row["Days"],
-        row["StartTimeFloat"],
-    )
+def _prerequisite_issue(curriculum: Curriculum, code: str) -> str:
+    course = curriculum.courses[code]
+    if isinstance(course.prerequisite, UnresolvedPrerequisite):
+        return f"{code}: prerequisite information is unavailable or unreadable ({course.prerequisite_text})."
+    return f"{code}: prerequisite cannot be met before an offered term ({course.prerequisite_text})."
 
 
-def _course_var_name(row: CourseRecord, year: int) -> str:
-    safe_code = row["Code"].replace(" ", "_")
-    safe_day = str(row["Days"]).replace(" ", "_")
-    return (
-        f"Take_{safe_code}_{year}_{row['Term']}_{safe_day}_at_{row['StartTimeFloat']}"
-    )
+def _rule_support(
+    model: Model,
+    rule: Prerequisite | None,
+    available: Callable[[MinimumGrade], bool | Expr],
+) -> bool | Expr:
+    if rule is None:
+        return True
+    if isinstance(rule, MinimumGrade):
+        return available(rule)
+    if isinstance(rule, UnresolvedPrerequisite):
+        return False
+
+    supports = [_rule_support(model, child, available) for child in rule.rules]
+    if isinstance(rule, AnyOf):
+        if any(support is True for support in supports):
+            return True
+        expressions = [support for support in supports if support is not False]
+        return quicksum(expressions) if expressions else False
+
+    if any(support is False for support in supports):
+        return False
+    expressions = [support for support in supports if support is not True]
+    if not expressions:
+        return True
+    if len(expressions) == 1:
+        return expressions[0]
+    satisfied = model.addVar(vtype="B")
+    for expression in expressions:
+        model.addCons(satisfied <= expression)
+    return satisfied
+
+
+def _section_conflicts(data: pd.DataFrame) -> dict[str, set[tuple[int, int]]]:
+    conflicts = defaultdict(set)
+    columns = ["SectionId", "Code", "StartTimeFloat", "EndTimeFloat"]
+    for (season, _), meetings in data.groupby(["Term", "Days"]):
+        active = []
+        for section_id, code, start, end in (
+            meetings.sort_values("StartTimeFloat")[columns].itertuples(index=False, name=None)
+        ):
+            active = [
+                (other_id, other_code, stop)
+                for other_id, other_code, stop in active
+                if stop > start
+            ]
+            for other_id, other_code, _ in active:
+                if other_code != code:
+                    conflicts[season].add(tuple(sorted((section_id, other_id))))
+            active.append((section_id, code, end))
+    return conflicts

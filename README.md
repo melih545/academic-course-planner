@@ -6,7 +6,7 @@ Course Planner is a Streamlit application that builds semester-by-semester sched
 
 - Reads a curriculum definition from `data/course_plans.csv`
 - Preprocesses historical lecture openings from `data/all_lectures.csv`
-- Filters viable sections based on recent offerings, quotas, and timetable quality
+- Uses historical sections with usable timetables and keeps all meetings of a section together
 - Generates multiple schedule options with PySCIPOpt
 - Lets you confirm one semester at a time and continue planning forward
 
@@ -73,7 +73,8 @@ The repository keeps its default CSV inputs under `data/` so the project can be 
 ## Known Limitations
 
 - The planner depends on the availability of PySCIPOpt in the local environment.
-- The scheduling model reflects the current project logic and heuristics; it is not a full academic rules engine.
+- The bundled planner uses four analytic electives, four functional electives, and one ITB course. Completed courses and confirmed plan terms count toward those totals.
+- Some curriculum rows contain a link prompt in place of prerequisite rules. The planner reports those rules as unavailable when they block a required course or elective target. A plan that places a prerequisite in an earlier term assumes the student will earn the required grade.
 - Bundled data is static, so results are only as current as the committed CSV snapshots.
 
 ## Roadmap

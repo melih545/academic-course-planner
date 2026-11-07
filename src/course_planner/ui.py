@@ -4,9 +4,11 @@ import pandas as pd
 import streamlit as st
 
 from .constants import ALL_LECTURES_PATH, COURSE_PLANS_PATH, GRADE_CREDITS, SEMESTER_LST
+from .curriculum import Curriculum, minimum_grades
 from .optimization import (
+    PlanResult,
+    ScheduledSection,
     advance_term,
-    build_planning_terms,
     generate_schedule_options,
     semester_position,
 )
@@ -45,7 +47,16 @@ def main() -> None:
         .to_dict()
     )
 
-    render_configuration_form(course_labels, processed_data)
+    curriculum = Curriculum.from_frame(course_plan)
+    grades = {
+        grade
+        for course in curriculum.courses.values()
+        for grade in minimum_grades(course.prerequisite)
+    }
+    for grade in grades:
+        course_labels.setdefault(grade.code, "External prerequisite")
+    higher_grade_options = sorted({grade.code for grade in grades if grade.grade == "BB"})
+    render_configuration_form(course_labels, higher_grade_options)
 
     if not st.session_state.calculated:
         st.info("Select completed courses and planning dates, then calculate schedule options.")
@@ -53,81 +64,66 @@ def main() -> None:
 
     if st.session_state.path:
         st.subheader("Confirmed Schedules")
-        for term, lectures in st.session_state.path.items():
-            if lectures:
-                visualize_schedule(
-                    st.session_state.path_data,
-                    lectures,
-                    title=f"Selected schedule for {term.replace('_', ' ')}",
-                )
-            else:
-                st.write(f"No courses selected for {term.replace('_', ' ')}.")
+    for term, sections in st.session_state.path.items():
+        if sections:
+            visualize_schedule(
+                processed_data, sections, title=f"Selected schedule for {term.replace('_', ' ')}"
+            )
+        else:
+            st.write(f"No courses selected for {term.replace('_', ' ')}.")
 
-    if st.session_state.remaining_data is None:
-        st.session_state.remaining_data = processed_data.copy()
+    confirmed_codes = {
+        section.code for sections in st.session_state.path.values() for section in sections
+    }
+    completed_grades = st.session_state.completed_grades
+    accounted_codes = set(completed_grades) | confirmed_codes
+    remaining_count = len(curriculum.remaining_required(accounted_codes)) + sum(
+        curriculum.elective_deficits(accounted_codes).values()
+    )
 
     status_col, remaining_col = st.columns(2)
     status_col.metric(
-        "Current Grade Level",
-        calculate_current_grade_level(
-            course_plan,
-            st.session_state.completed_courses,
-        ),
+        "Current Grade Level", calculate_current_grade_level(course_plan, completed_grades)
     )
-    remaining_col.metric(
-        "Remaining Courses",
-        st.session_state.remaining_data["Code"].nunique(),
-    )
-
-    if st.session_state.remaining_data.empty:
-        st.success("All remaining courses have been scheduled within the selected plan.")
+    remaining_col.metric("Remaining Required Courses and Electives", remaining_count)
+    if not remaining_count:
+        st.success("All remaining curriculum requirements have been scheduled or completed.")
         return
 
-    try:
-        build_planning_terms(
-            st.session_state.current_year,
-            st.session_state.current_semester,
-            st.session_state.last_year,
-            st.session_state.last_semester,
-        )
-    except ValueError:
-        st.warning("The selected planning window has ended before all remaining courses were scheduled.")
+    current_term = (st.session_state.current_year, st.session_state.current_semester)
+    last_term = (st.session_state.last_year, st.session_state.last_semester)
+    if semester_position(*current_term) > semester_position(*last_term):
+        st.warning("The planning window has ended with outstanding curriculum requirements.")
         return
 
-    if st.session_state.updated:
+    if st.session_state.result is None:
         with st.spinner("Generating schedule options..."):
             try:
-                st.session_state.unique_paths = generate_schedule_options(
-                    st.session_state.remaining_data,
-                    st.session_state.completed_courses,
-                    st.session_state.current_year,
-                    st.session_state.current_semester,
-                    st.session_state.last_year,
-                    st.session_state.last_semester,
+                st.session_state.result = generate_schedule_options(
+                    processed_data,
+                    completed_grades,
+                    *current_term,
+                    *last_term,
+                    curriculum=curriculum,
+                    confirmed_courses=confirmed_codes,
                 )
             except RuntimeError as error:
                 st.error(str(error))
                 return
-        st.session_state.updated = False
-
-    st.subheader(
-        f"Planning for {st.session_state.current_year} {st.session_state.current_semester}"
-    )
-
-    if not st.session_state.unique_paths:
-        st.warning("No feasible schedules were found for the remaining planning window.")
+    result: PlanResult = st.session_state.result
+    st.subheader(f"Planning for {current_term[0]} {current_term[1]}")
+    if result.issues:
+        issues = "\n".join(f"- {issue}" for issue in result.issues)
+        st.warning(f"No feasible schedule was found.\n\n{issues}")
         return
 
-    render_schedule_options(course_plan, st.session_state.remaining_data)
+    st.caption("Prerequisites scheduled in earlier terms are conditional on earning their minimum grades.")
+    render_schedule_options(course_labels, curriculum, processed_data, result.options)
 
 
 def initialize_session_state() -> None:
-    if "remaining_data" not in st.session_state:
-        st.session_state.remaining_data = None
-    if "completed_courses" not in st.session_state:
-        st.session_state.completed_courses = []
-    if "seed_completed_courses" not in st.session_state:
-        st.session_state.seed_completed_courses = []
+    if "completed_grades" not in st.session_state:
+        st.session_state.completed_grades = {}
     if "current_year" not in st.session_state:
         st.session_state.current_year = 2024
     if "current_semester" not in st.session_state:
@@ -138,18 +134,14 @@ def initialize_session_state() -> None:
         st.session_state.last_semester = SEMESTER_LST[0]
     if "path" not in st.session_state:
         st.session_state.path = {}
-    if "path_data" not in st.session_state:
-        st.session_state.path_data = pd.DataFrame()
-    if "unique_paths" not in st.session_state:
-        st.session_state.unique_paths = []
-    if "updated" not in st.session_state:
-        st.session_state.updated = False
+    if "result" not in st.session_state:
+        st.session_state.result = None
     if "calculated" not in st.session_state:
         st.session_state.calculated = False
 
 
 def render_configuration_form(
-    course_labels: dict[str, str], processed_data: pd.DataFrame
+    course_labels: dict[str, str], higher_grade_options: list[str]
 ) -> None:
     max_year = max(2034, st.session_state.current_year, st.session_state.last_year) + 1
     available_years = list(range(2024, max_year + 1))
@@ -162,8 +154,19 @@ def render_configuration_form(
         selected_completed_courses = st.multiselect(
             "Select completed courses",
             options=sorted(course_labels),
-            default=st.session_state.seed_completed_courses,
+            default=list(st.session_state.completed_grades),
+            help="Selected courses count as DD or higher unless marked BB or higher below.",
             format_func=lambda code: f"{code} - {course_labels.get(code, code)}",
+        )
+
+        completed_with_bb = st.multiselect(
+            "Completed prerequisites with a grade of BB or higher",
+            options=higher_grade_options,
+            default=[
+                code for code in higher_grade_options
+                if st.session_state.completed_grades.get(code) == "BB"
+            ],
+            format_func=lambda code: f"{code} - {course_labels[code]}",
         )
 
         col1, col2 = st.columns(2)
@@ -210,48 +213,30 @@ def render_configuration_form(
         st.error("The finish semester must not be earlier than the current semester.")
         return
 
-    reset_planner(
-        processed_data,
-        selected_completed_courses,
-        current_year,
-        current_semester,
-        last_year,
-        last_semester,
-    )
-    st.rerun()
+    if set(completed_with_bb) - set(selected_completed_courses):
+        st.error("Select each BB-or-higher course in the completed courses list as well.")
+        return
 
-
-def reset_planner(
-    processed_data: pd.DataFrame,
-    selected_completed_courses: list[str],
-    current_year: int,
-    current_semester: str,
-    last_year: int,
-    last_semester: str,
-) -> None:
-    completed_courses = list(dict.fromkeys(selected_completed_courses))
-
-    st.session_state.seed_completed_courses = completed_courses.copy()
-    st.session_state.completed_courses = completed_courses.copy()
+    st.session_state.completed_grades = {
+        code: "BB" if code in completed_with_bb else "DD"
+        for code in selected_completed_courses
+    }
     st.session_state.current_year = current_year
     st.session_state.current_semester = current_semester
     st.session_state.last_year = last_year
     st.session_state.last_semester = last_semester
-    st.session_state.remaining_data = processed_data[
-        ~processed_data["Code"].isin(completed_courses)
-    ].reset_index(drop=True)
     st.session_state.path = {}
-    st.session_state.path_data = pd.DataFrame()
-    st.session_state.unique_paths = []
-    st.session_state.updated = True
+    st.session_state.result = None
     st.session_state.calculated = True
+    st.rerun()
 
 
 def calculate_current_grade_level(
-    course_plan: pd.DataFrame, completed_courses: list[str]
+    course_plan: pd.DataFrame, completed_grades: dict[str, str]
 ) -> int:
     completed_credits = pd.to_numeric(
-        course_plan[course_plan["Course Code"].isin(completed_courses)]["Credits"],
+        course_plan.drop_duplicates("Course Code")
+        .loc[lambda rows: rows["Course Code"].isin(completed_grades), "Credits"],
         errors="coerce",
     ).sum()
 
@@ -266,130 +251,46 @@ def calculate_current_grade_level(
 
 
 def render_schedule_options(
-    course_plan: pd.DataFrame, current_data: pd.DataFrame
+    course_labels: dict[str, str],
+    curriculum: Curriculum,
+    data: pd.DataFrame,
+    options: list[list[ScheduledSection]],
 ) -> None:
-    course_name_lookup = (
-        course_plan.drop_duplicates(subset=["Course Code"])
-        .set_index("Course Code")["Course Name"]
-        .to_dict()
-    )
-    type_lookup = (
-        current_data.drop_duplicates(subset=["Code"])
-        .set_index("Code")["Type"]
-        .fillna("")
-        .to_dict()
-    )
-
-    option_indices = list(range(len(st.session_state.unique_paths)))
-    for option_index, path in enumerate(st.session_state.unique_paths, start=1):
-        term_path = [
-            course
-            for course in path
-            if course[1] == st.session_state.current_year
-            and course[2] == st.session_state.current_semester
+    current_year = st.session_state.current_year
+    current_semester = st.session_state.current_semester
+    term_options = [
+        [
+            section for section in plan
+            if (section.year, section.term) == (current_year, current_semester)
         ]
-
-        st.subheader(f"Option {option_index}")
-        if not term_path:
+        for plan in options
+    ]
+    for number, sections in enumerate(term_options, start=1):
+        st.subheader(f"Option {number}")
+        if not sections:
             st.write("No courses scheduled for this term.")
             continue
 
-        selected_codes = sorted({course[0] for course in term_path})
-        st.write(
-            "Courses:",
-            ", ".join(
-                f"{code} - {course_name_lookup.get(code, code)}" for code in selected_codes
-            ),
-        )
-        st.write(f"ITB Courses: {_count_courses_by_type(type_lookup, term_path, 'ITB')}")
-        st.write(
-            "Elective Analytic Courses: "
-            f"{_count_courses_by_type(type_lookup, term_path, 'Elective Analytic')}"
-        )
-        st.write(
-            "Elective Functional Courses: "
-            f"{_count_courses_by_type(type_lookup, term_path, 'Elective Functional')}"
-        )
-        st.write(
-            "Main Courses: "
-            f"{_count_main_courses(type_lookup, term_path)}"
-        )
-        visualize_schedule(current_data, term_path, title=f"Option {option_index} Schedule")
+        codes = sorted(section.code for section in sections)
+        st.write("Courses:", ", ".join(f"{code} - {course_labels[code]}" for code in codes))
+        for category in ("ITB", "Elective Analytic", "Elective Functional", "Main"):
+            count = sum(curriculum.courses[code].category == category for code in codes)
+            st.write(f"{category} Courses: {count}")
+        visualize_schedule(data, sections, title=f"Option {number} Schedule")
 
     selected_option = st.radio(
         "Select your preferred schedule",
-        options=option_indices,
-        format_func=lambda option_index: f"Option {option_index + 1}",
-        key=f"radio_{st.session_state.current_year}_{st.session_state.current_semester}",
+        options=range(len(term_options)),
+        format_func=lambda index: f"Option {index + 1}",
+        key=f"radio_{current_year}_{current_semester}",
     )
-    confirmed = st.button(
-        f"Confirm {st.session_state.current_year} {st.session_state.current_semester}",
-        key=f"confirm_{st.session_state.current_year}_{st.session_state.current_semester}",
-    )
-
-    if not confirmed:
-        return
-
-    confirm_selected_path(
-        st.session_state.unique_paths[selected_option],
-        current_data,
-    )
-    st.rerun()
-
-
-def confirm_selected_path(selected_path: list[list], current_data: pd.DataFrame) -> None:
-    selected_courses = [
-        course
-        for course in selected_path
-        if course[1] == st.session_state.current_year
-        and course[2] == st.session_state.current_semester
-    ]
-
-    selected_codes = [course[0] for course in selected_courses]
-    st.session_state.completed_courses = list(
-        dict.fromkeys(st.session_state.completed_courses + selected_codes)
-    )
-    st.session_state.remaining_data = current_data[
-        ~current_data["Code"].isin(st.session_state.completed_courses)
-    ].reset_index(drop=True)
-
-    selected_rows = current_data[
-        current_data.apply(
-            lambda row: any(
-                row["Code"] == course[0]
-                and row["Term"] == course[2]
-                and row["Days"] == course[3]
-                and row["StartTimeFloat"] == course[4]
-                for course in selected_courses
-            ),
-            axis=1,
+    if st.button(
+        f"Confirm {current_year} {current_semester}",
+        key=f"confirm_{current_year}_{current_semester}",
+    ):
+        st.session_state.path[f"{current_year}_{current_semester}"] = term_options[selected_option]
+        st.session_state.current_year, st.session_state.current_semester = advance_term(
+            current_year, current_semester
         )
-    ]
-    st.session_state.path_data = pd.concat(
-        [st.session_state.path_data, selected_rows],
-        ignore_index=True,
-    ).drop_duplicates()
-    st.session_state.path[
-        f"{st.session_state.current_year}_{st.session_state.current_semester}"
-    ] = selected_courses
-
-    next_year, next_semester = advance_term(
-        st.session_state.current_year,
-        st.session_state.current_semester,
-    )
-    st.session_state.current_year = next_year
-    st.session_state.current_semester = next_semester
-    st.session_state.updated = True
-
-
-def _count_courses_by_type(
-    type_lookup: dict[str, str], term_path: list[list], expected_type: str
-) -> int:
-    return sum(1 for course in term_path if type_lookup.get(course[0], "") == expected_type)
-
-
-def _count_main_courses(type_lookup: dict[str, str], term_path: list[list]) -> int:
-    excluded_types = {"ITB", "Elective Analytic", "Elective Functional"}
-    return sum(
-        1 for course in term_path if type_lookup.get(course[0], "") not in excluded_types
-    )
+        st.session_state.result = None
+        st.rerun()

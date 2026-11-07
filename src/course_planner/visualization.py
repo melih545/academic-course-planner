@@ -6,13 +6,14 @@ import pandas as pd
 import streamlit as st
 
 from .constants import DAY_MAP, DISPLAY_END_HOUR, DISPLAY_START_HOUR, WEEKDAYS
-from .preprocessing import time_to_float
+from .optimization import ScheduledSection
 
 
 def visualize_schedule(
-    data: pd.DataFrame, selected_courses: list[list], title: str = "Schedule"
+    data: pd.DataFrame, selected_sections: list[ScheduledSection], title: str = "Schedule"
 ) -> None:
-    plot_data = data.copy()
+    section_ids = {section.section_id for section in selected_sections}
+    plot_data = data[data["SectionId"].isin(section_ids)].copy()
     plot_data["DayIndex"] = plot_data["Days"].map(DAY_MAP)
 
     figure, axis = plt.subplots(figsize=(10, 6))
@@ -24,21 +25,12 @@ def visualize_schedule(
     axis.set_yticklabels([f"{hour}:00" for hour in times])
 
     for _, row in plot_data.iterrows():
-        if not any(
-            row["Code"] == course[0]
-            and row["Days"] == course[3]
-            and row["StartTimeFloat"] == course[4]
-            for course in selected_courses
-        ):
+        if pd.isna(row["DayIndex"]) or pd.isna(row["StartTimeFloat"]):
             continue
 
         try:
-            if pd.isna(row["Times"]) or "/" not in row["Times"] or "490" in row["Code"]:
-                continue
-
-            start_time, end_time = row["Times"].split("/")
-            y_position = time_to_float(start_time) - DISPLAY_START_HOUR
-            height = time_to_float(end_time) - time_to_float(start_time)
+            y_position = row["StartTimeFloat"] - DISPLAY_START_HOUR
+            height = row["EndTimeFloat"] - row["StartTimeFloat"]
             if height <= 0:
                 continue
 
@@ -70,3 +62,4 @@ def visualize_schedule(
     axis.grid(True)
     plt.tight_layout()
     st.pyplot(figure)
+    plt.close(figure)

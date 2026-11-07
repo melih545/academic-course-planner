@@ -11,11 +11,6 @@ from .constants import DAY_MAP
 _TIME_RANGE = re.compile(r"(?:[01]\d|2[0-3])[0-5]\d/(?:[01]\d|2[0-3])[0-5]\d")
 
 
-PREREQUISITE_PATTERN = re.compile(
-    r"\b(END \d+E|MAT \d+E|ATA \d+|TUR \d+|FIZ \d+EL|FIZ \d+E|KIM \d+EL|KIM \d+E)\b"
-)
-
-
 def to_semesters(term: str) -> str | None:
     if "Yaz" in term:
         return "Summer"
@@ -83,41 +78,6 @@ def time_to_float(time_str: str) -> float:
     return hours + minutes / 60
 
 
-def check_conflict(row1: pd.Series | dict, row2: pd.Series | dict) -> bool:
-    return (
-        row1["Days"] == row2["Days"]
-        and row1["Term"] == row2["Term"]
-        and (
-            (
-                row1["StartTimeFloat"] < row2["EndTimeFloat"]
-                and row1["EndTimeFloat"] > row2["StartTimeFloat"]
-            )
-            or (
-                row2["StartTimeFloat"] < row1["EndTimeFloat"]
-                and row2["EndTimeFloat"] > row1["StartTimeFloat"]
-            )
-            or (row1["StartTimeFloat"] == row2["StartTimeFloat"])
-            or (row1["EndTimeFloat"] == row2["EndTimeFloat"])
-        )
-    )
-
-
-def prerequisites(pre: object) -> str | None:
-    if pd.isna(pre):
-        return None
-
-    pre_text = str(pre).strip()
-    if not pre_text or "MIN" not in pre_text:
-        return None
-
-    matches = PREREQUISITE_PATTERN.findall(pre_text)
-    if not matches:
-        return None
-    if len(matches) == 1:
-        return matches[0]
-    return ", ".join(matches)
-
-
 def calculate_take_probability(df: pd.DataFrame) -> pd.DataFrame:
     probability_df = df.copy()
     probability_df["Registered"] = pd.to_numeric(
@@ -173,7 +133,7 @@ def process_uploaded_files(
     lecture_metadata = {
         row["Course Code"]: {
             "Credits": row["Credits"],
-            "Prerequisites": prerequisites(row["Prerequisites"]),
+            "Prerequisites": row["Prerequisites"],
             "Grade": int((float(str(row["Semester"]).split(".")[0]) + 1) // 2),
             "Type": row["Type"],
         }
