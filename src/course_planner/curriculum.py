@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping, Set
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 
@@ -137,9 +137,12 @@ class RequirementProgress:
 @dataclass(frozen=True)
 class Curriculum:
     courses: Mapping[str, Course]
+    elective_minimums: Mapping[str, int] = field(default_factory=ELECTIVE_MINIMUMS.copy)
 
     @classmethod
-    def from_frame(cls, data: pd.DataFrame) -> Curriculum:
+    def from_frame(
+        cls, data: pd.DataFrame, elective_minimums: Mapping[str, int] | None = None
+    ) -> Curriculum:
         courses = {}
         for code, category, text, credits in data[
             ["Course Code", "Type", "Prerequisites", "Credits"]
@@ -147,7 +150,7 @@ class Curriculum:
             courses[code] = Course(
                 category, parse_prerequisite(text), "" if pd.isna(text) else str(text), float(credits)
             )
-        return cls(courses)
+        return cls(courses) if elective_minimums is None else cls(courses, dict(elective_minimums))
 
     def remaining_required(self, completed: Set[str]) -> set[str]:
         return {
@@ -167,7 +170,7 @@ class Curriculum:
                     if code in self.courses
                 ),
             )
-            for category, minimum in ELECTIVE_MINIMUMS.items()
+            for category, minimum in self.elective_minimums.items()
             if category in categories
         }
 
@@ -187,6 +190,6 @@ class Curriculum:
         for category, deficit in self.elective_deficits(completed).items():
             remaining = remaining_electives[category]
             rows.append(RequirementProgress(
-                category, ELECTIVE_MINIMUMS[category] - deficit, deficit - remaining, remaining
+                category, self.elective_minimums[category] - deficit, deficit - remaining, remaining
             ))
         return tuple(rows)

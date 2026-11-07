@@ -117,7 +117,9 @@ def process_uploaded_files(
     return process_lecture_history(pd.read_csv(uploaded_file), necessary_lectures)
 
 
-def process_lecture_history(data: pd.DataFrame, necessary_lectures: pd.DataFrame) -> pd.DataFrame:
+def process_lecture_history(
+    data: pd.DataFrame, necessary_lectures: pd.DataFrame, department: str | None = "ENDE"
+) -> pd.DataFrame:
     data = data.rename(
         columns={
             "Kod": "Code",
@@ -158,7 +160,12 @@ def process_lecture_history(data: pd.DataFrame, necessary_lectures: pd.DataFrame
     ).groupby(["Code", "Year", "Term", "SourceCRN"], sort=False, dropna=False).ngroup()
     filtered_data["Quota"] = pd.to_numeric(filtered_data["Quota"], errors="coerce")
     filtered_data["Registered"] = pd.to_numeric(filtered_data["Registered"], errors="coerce")
-    eligible_rows = filtered_data["DepartmentRestrictions"].str.contains(r"\bENDE\b", na=False)
+    eligible_rows = (
+        filtered_data["DepartmentRestrictions"].astype("string").str.contains(
+            rf"\b{re.escape(department)}\b", na=False
+        )
+        if department else pd.Series(True, index=filtered_data.index)
+    )
 
     expanded_rows: list[pd.Series] = []
     for _, section in filtered_data.groupby("SectionId", sort=False):

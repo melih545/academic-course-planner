@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from hashlib import sha256
 
 import pandas as pd
 import streamlit as st
@@ -13,8 +14,8 @@ from .constants import (
     SEMESTER_LST,
     WEEKDAYS,
 )
-from .curriculum import ELECTIVE_MINIMUMS, Curriculum, minimum_grades
-from .datasets import Dataset
+from .curriculum import ELECTIVE_MINIMUMS, GRADE_ORDER, Curriculum, minimum_grades
+from .datasets import MAX_CSV_MB, Dataset, parse_uploaded_dataset
 from .optimization import PlanResult, generate_schedule_options
 from .schedule import (
     ConfirmedTerm,
@@ -32,6 +33,65 @@ def load_dataset(lectures_path: str, course_plan_path: str) -> Dataset:
     return Dataset.from_frames(pd.read_csv(course_plan_path), pd.read_csv(lectures_path))
 
 
+def select_dataset() -> tuple[Dataset, bool, dict[str, int] | None] | None:
+    source = st.radio("Data source", ["Bundled data", "Use my CSV files"], horizontal=True)
+    bundled = source == "Bundled data"
+    minimums = None
+    if bundled:
+        token = ("bundled",)
+        dataset = load_dataset(str(ALL_LECTURES_PATH), str(COURSE_PLANS_PATH))
+    else:
+        left, right = st.columns(2)
+        catalog_file = left.file_uploader("Curriculum CSV", type="csv", max_upload_size=MAX_CSV_MB)
+        history_file = right.file_uploader("Lecture history CSV", type="csv", max_upload_size=MAX_CSV_MB)
+        st.caption("Upload either file or both. The bundled file is used for any input left empty.")
+        if catalog_file is None and history_file is None:
+            return None
+        department = st.text_input(
+            "Department code filter",
+            value="ENDE" if catalog_file is None else "",
+            max_chars=20,
+            help="Leave blank to allow all departments in the timetable.",
+        ).strip().upper()
+        catalog_bytes = catalog_file.getvalue() if catalog_file is not None else None
+        history_bytes = history_file.getvalue() if history_file is not None else None
+        file_token = (
+            sha256(catalog_bytes).hexdigest() if catalog_bytes is not None else "bundled",
+            sha256(history_bytes).hexdigest() if history_bytes is not None else "bundled",
+            department,
+        )
+        cached = st.session_state.get("uploaded_dataset")
+        if cached is None or cached[0] != file_token:
+            try:
+                dataset = parse_uploaded_dataset(
+                    catalog_bytes if catalog_bytes is not None else COURSE_PLANS_PATH.read_bytes(),
+                    history_bytes if history_bytes is not None else ALL_LECTURES_PATH.read_bytes(),
+                    department or None,
+                )
+            except ValueError as error:
+                st.error(str(error))
+                return None
+            st.session_state.uploaded_dataset = (file_token, dataset)
+        else:
+            dataset = cached[1]
+
+        with st.expander("Elective requirements"):
+            minimums = {
+                category: st.number_input(
+                    category, min_value=0, value=default, max_value=100, key=f"quota_{file_token}_{category}"
+                )
+                for category, default in ELECTIVE_MINIMUMS.items()
+                if category in set(dataset.catalog["Type"])
+            }
+        token = (*file_token, tuple(minimums.items()))
+
+    if st.session_state.get("active_dataset") != token:
+        st.session_state.pop("planner", None)
+        st.session_state.pop("result", None)
+        st.session_state.active_dataset = token
+    return dataset, bundled, minimums
+
+
 def main() -> None:
     st.set_page_config(page_title="Course Planner", layout="wide")
     st.title("Course Planner")
@@ -39,10 +99,14 @@ def main() -> None:
         "Generate semester-by-semester schedule options from bundled course history and curriculum data."
     )
 
-    dataset = load_dataset(str(ALL_LECTURES_PATH), str(COURSE_PLANS_PATH))
+    selection = select_dataset()
+    if selection is None:
+        return
+    dataset, bundled, minimums = selection
     course_plan = dataset.catalog
+    source_label = "Bundled" if bundled else "Selected"
     st.caption(
-        f"Bundled lecture history: {dataset.first_term}–{dataset.last_term}. "
+        f"{source_label} lecture history: {dataset.first_term}–{dataset.last_term}. "
         "Future sections are projections based on historical timetables."
     )
     course_labels = (
@@ -51,7 +115,7 @@ def main() -> None:
         .to_dict()
     )
 
-    curriculum = Curriculum.from_frame(course_plan)
+    curriculum = Curriculum.from_frame(course_plan, minimums)
     grades = {
         grade
         for course in curriculum.courses.values()
@@ -59,9 +123,13 @@ def main() -> None:
     }
     for grade in grades:
         course_labels.setdefault(grade.code, "External prerequisite")
-    higher_grade_options = sorted({grade.code for grade in grades if grade.grade == "BB"})
+    higher_grade_options = {
+        grade: sorted({item.code for item in grades if item.grade == grade})
+        for grade in GRADE_ORDER[GRADE_ORDER.index("DD") + 1:]
+        if any(item.grade == grade for item in grades)
+    }
     session: PlanningSession | None = st.session_state.get("planner")
-    if st.button("Load example plan", help="Use a simulated transcript with two courses left."):
+    if bundled and st.button("Load example plan", help="Use a simulated transcript with two courses left."):
         request = example_request(curriculum)
     else:
         request = render_configuration_form(course_labels, higher_grade_options, session)
@@ -189,7 +257,7 @@ def example_request(curriculum: Curriculum) -> PlanRequest:
 
 def render_configuration_form(
     course_labels: dict[str, str],
-    higher_grade_options: list[str],
+    higher_grade_options: dict[str, list[str]],
     session: PlanningSession | None,
 ) -> PlanRequest | None:
     start = session.request.start if session else current_planning_term()
@@ -197,24 +265,24 @@ def render_configuration_form(
     completed = session.request.completed_grades if session else {}
     available_years = list(range(min(2024, start.year), max(2034, start.year, end.year) + 2))
 
-    with st.form("planner_controls"):
+    with st.form(f"planner_controls_{st.session_state.active_dataset}"):
         selected_completed_courses = st.multiselect(
             "Select completed courses",
             options=sorted(course_labels),
             default=list(completed),
-            help="Selected courses count as DD or higher unless marked BB or higher below.",
+            help="Selected courses count as DD or higher unless a higher grade is marked below.",
             format_func=lambda code: f"{code} - {course_labels.get(code, code)}",
         )
 
-        completed_with_bb = st.multiselect(
-            "Completed prerequisites with a grade of BB or higher",
-            options=higher_grade_options,
-            default=[
-                code for code in higher_grade_options
-                if completed.get(code) == "BB"
-            ],
-            format_func=lambda code: f"{code} - {course_labels[code]}",
-        )
+        grade_overrides = {}
+        for grade, options in higher_grade_options.items():
+            selected = st.multiselect(
+                f"Completed prerequisites with a grade of {grade} or higher",
+                options=options,
+                default=[code for code in options if completed.get(code) == grade],
+                format_func=lambda code: f"{code} - {course_labels[code]}",
+            )
+            grade_overrides.update(dict.fromkeys(selected, grade))
 
         col1, col2 = st.columns(2)
         with col1:
@@ -268,12 +336,12 @@ def render_configuration_form(
     if not submitted:
         return
 
-    if set(completed_with_bb) - set(selected_completed_courses):
-        st.error("Select each BB-or-higher course in the completed courses list as well.")
+    if set(grade_overrides) - set(selected_completed_courses):
+        st.error("Add each course with a grade override to the completed courses list.")
         return
 
     completed = {
-        code: "BB" if code in completed_with_bb else "DD"
+        code: grade_overrides.get(code, "DD")
         for code in selected_completed_courses
     }
     try:
