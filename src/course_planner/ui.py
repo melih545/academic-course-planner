@@ -25,7 +25,7 @@ from .schedule import (
     Term,
     current_planning_term,
 )
-from .visualization import visualize_schedule
+from .visualization import schedule_hours, visualize_schedule
 
 
 @st.cache_data(show_spinner=False)
@@ -388,6 +388,7 @@ def render_schedule_options(
     st.subheader("Compare Schedule Options")
     st.caption("Compare full paths below. Confirming an option saves only the current term.")
     choice_ids = range(len(options))
+    hours = schedule_hours([section for term in term_options for section in term])
     for side, column in enumerate(st.columns(min(2, len(options)))):
         with column:
             if len(options) == 1:
@@ -400,7 +401,7 @@ def render_schedule_options(
                     format_func=lambda index: f"Option {index + 1}",
                     key=f"compare_{current_term}_{side}",
                 )
-            show_option(options[choice], current_term, curriculum, course_labels)
+            show_option(options[choice], current_term, curriculum, course_labels, hours)
 
     selected_option = st.radio(
         "Select your preferred schedule",
@@ -422,13 +423,16 @@ def show_option(
     current_term: Term,
     curriculum: Curriculum,
     course_labels: dict[str, str],
+    hours: tuple[int, int],
 ) -> None:
     by_term = {}
     for section in option:
         by_term.setdefault(section.term, []).append(section)
     current = by_term.get(current_term, [])
     if current:
-        visualize_schedule(current, course_labels, title=f"Weekly schedule for {current_term}")
+        visualize_schedule(
+            current, course_labels, title=f"Weekly schedule for {current_term}", hours=hours
+        )
     else:
         st.info("No courses scheduled for this term.")
     if by_term:

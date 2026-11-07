@@ -11,17 +11,21 @@ from .constants import DAY_MAP, DISPLAY_END_HOUR, DISPLAY_START_HOUR, WEEKDAYS
 from .schedule import ScheduledSection
 
 
+def schedule_hours(selected_sections: Sequence[ScheduledSection]) -> tuple[int, int]:
+    meetings = [meeting for selected in selected_sections for meeting in selected.section.meetings]
+    start = min((floor(meeting.start_minute / 60) for meeting in meetings), default=DISPLAY_START_HOUR)
+    end = max((ceil(meeting.end_minute / 60) for meeting in meetings), default=DISPLAY_END_HOUR)
+    return min(start, DISPLAY_START_HOUR), max(end, 16)
+
+
 def visualize_schedule(
     selected_sections: Sequence[ScheduledSection],
     course_labels: Mapping[str, str],
     title: str = "Schedule",
+    hours: tuple[int, int] | None = None,
 ) -> None:
     figure, axis = plt.subplots(figsize=(10, 6))
-    meetings = [meeting for selected in selected_sections for meeting in selected.section.meetings]
-    start_hour = min((floor(meeting.start_minute / 60) for meeting in meetings), default=DISPLAY_START_HOUR)
-    end_hour = max((ceil(meeting.end_minute / 60) for meeting in meetings), default=DISPLAY_END_HOUR)
-    start_hour = min(start_hour, DISPLAY_START_HOUR)
-    end_hour = max(end_hour, 16)
+    start_hour, end_hour = hours or schedule_hours(selected_sections)
     times = range(start_hour, end_hour + 1)
     axis.set_xticks(range(len(WEEKDAYS)), WEEKDAYS)
     axis.set_yticks(range(len(times)), [f"{hour}:00" for hour in times])
