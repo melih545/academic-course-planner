@@ -6,22 +6,22 @@ import pandas as pd
 import streamlit as st
 
 from .constants import ALL_LECTURES_PATH, COURSE_PLANS_PATH, GRADE_CREDITS, SEMESTER_LST
-from .curriculum import Curriculum, minimum_grades
+from .curriculum import ELECTIVE_MINIMUMS, Curriculum, minimum_grades
+from .datasets import Dataset
 from .optimization import PlanResult, generate_schedule_options
-from .preprocessing import process_uploaded_files, sections_from_frame
-from .schedule import PlanningSession, PlanRequest, ScheduledSection, Section, Term
+from .schedule import (
+    PlanningSession,
+    PlanRequest,
+    ScheduledSection,
+    Term,
+    current_planning_term,
+)
 from .visualization import visualize_schedule
 
 
 @st.cache_data(show_spinner=False)
-def load_course_plan(path: str) -> pd.DataFrame:
-    return pd.read_csv(path)
-
-
-@st.cache_data(show_spinner=False)
-def load_sections(lectures_path: str, course_plan_path: str) -> tuple[Section, ...]:
-    course_plan = pd.read_csv(course_plan_path)
-    return sections_from_frame(process_uploaded_files(lectures_path, course_plan))
+def load_dataset(lectures_path: str, course_plan_path: str) -> Dataset:
+    return Dataset.from_frames(pd.read_csv(course_plan_path), pd.read_csv(lectures_path))
 
 
 def main() -> None:
@@ -31,10 +31,11 @@ def main() -> None:
         "Generate semester-by-semester schedule options from bundled course history and curriculum data."
     )
 
-    course_plan = load_course_plan(str(COURSE_PLANS_PATH))
-    sections = load_sections(
-        str(ALL_LECTURES_PATH),
-        str(COURSE_PLANS_PATH),
+    dataset = load_dataset(str(ALL_LECTURES_PATH), str(COURSE_PLANS_PATH))
+    course_plan = dataset.catalog
+    st.caption(
+        f"Bundled lecture history: {dataset.first_term}–{dataset.last_term}. "
+        "Future sections are projections based on historical timetables."
     )
     course_labels = (
         course_plan.drop_duplicates(subset=["Course Code"])
@@ -52,7 +53,10 @@ def main() -> None:
         course_labels.setdefault(grade.code, "External prerequisite")
     higher_grade_options = sorted({grade.code for grade in grades if grade.grade == "BB"})
     session: PlanningSession | None = st.session_state.get("planner")
-    request = render_configuration_form(course_labels, higher_grade_options, session)
+    if st.button("Load example plan", help="Use a simulated transcript with two courses left."):
+        request = example_request(curriculum)
+    else:
+        request = render_configuration_form(course_labels, higher_grade_options, session)
     if request is not None:
         st.session_state.planner = PlanningSession(request)
         st.session_state.result = None
@@ -96,7 +100,7 @@ def main() -> None:
         with st.spinner("Generating schedule options..."):
             try:
                 st.session_state.result = generate_schedule_options(
-                    sections,
+                    dataset.sections,
                     PlanRequest(current_term, session.request.end, completed_grades),
                     curriculum=curriculum,
                     confirmed_courses=session.confirmed_codes,
@@ -124,15 +128,26 @@ def main() -> None:
     render_schedule_options(course_labels, curriculum, session, result.options)
 
 
+def example_request(curriculum: Curriculum) -> PlanRequest:
+    remaining = {"MAT 103E", "MAT 104E"}
+    completed = {code: "DD" for code in curriculum.remaining_required(set()) - remaining}
+    for category, count in ELECTIVE_MINIMUMS.items():
+        codes = sorted(code for code, course in curriculum.courses.items() if course.category == category)
+        completed.update(dict.fromkeys(codes[:count], "DD"))
+    current = current_planning_term()
+    spring = Term(current.year + (current.season != "Spring"), "Spring")
+    return PlanRequest(spring, Term(spring.year, "Fall"), completed)
+
+
 def render_configuration_form(
     course_labels: dict[str, str],
     higher_grade_options: list[str],
     session: PlanningSession | None,
 ) -> PlanRequest | None:
-    start = session.request.start if session else Term(2024, "Spring")
+    start = session.request.start if session else current_planning_term()
     end = session.request.end if session else start
     completed = session.request.completed_grades if session else {}
-    available_years = list(range(2024, max(2034, end.year) + 2))
+    available_years = list(range(min(2024, start.year), max(2034, start.year, end.year) + 2))
 
     with st.form("planner_controls"):
         selected_completed_courses = st.multiselect(
@@ -176,7 +191,7 @@ def render_configuration_form(
             )
         with col2:
             last_semester = st.selectbox(
-                "Select the last semester you attended",
+                "Select the final semester",
                 options=SEMESTER_LST,
                 index=SEMESTER_LST.index(end.season),
             )

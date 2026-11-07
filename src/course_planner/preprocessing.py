@@ -114,8 +114,11 @@ def calculate_open_rate(data: pd.DataFrame) -> pd.DataFrame:
 def process_uploaded_files(
     uploaded_file: str | Path, necessary_lectures: pd.DataFrame
 ) -> pd.DataFrame:
-    data = pd.read_csv(uploaded_file)
-    data.rename(
+    return process_lecture_history(pd.read_csv(uploaded_file), necessary_lectures)
+
+
+def process_lecture_history(data: pd.DataFrame, necessary_lectures: pd.DataFrame) -> pd.DataFrame:
+    data = data.rename(
         columns={
             "Kod": "Code",
             "Ders": "CourseName",
@@ -127,7 +130,6 @@ def process_uploaded_files(
             "Kontenjan": "Quota",
             "Bölüm sınırlaması": "DepartmentRestrictions",
         },
-        inplace=True,
     )
 
     lecture_metadata = {

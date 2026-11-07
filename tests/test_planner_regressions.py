@@ -179,7 +179,7 @@ def test_default_calculate_explains_why_the_plan_cannot_be_built():
     app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30).run()
     assert not app.exception
 
-    app.button[0].click().run()
+    next(button for button in app.button if button.label == "Calculate").click().run()
 
     assert not app.exception
     assert any("DAN 102" in warning.value for warning in app.warning)
@@ -188,18 +188,15 @@ def test_default_calculate_explains_why_the_plan_cannot_be_built():
 
 def test_calculate_and_confirm_a_feasible_plan_with_bundled_data():
     app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30).run()
-    catalog = pd.read_csv(ROOT / "data" / "course_plans.csv")
-    app.multiselect[0].set_value(sorted(set(catalog["Course Code"]) - {"MAT 103E", "MAT 104E"}))
-    app.selectbox[2].select(2025)
-    app.button[0].click().run()
-
-    assert app.button[-1].label == "Confirm 2024 Spring"
+    next(button for button in app.button if button.label == "Load example plan").click().run()
+    spring = app.session_state.planner.request.start
+    assert app.button[-1].label == f"Confirm {spring}"
     for _ in range(3):
         assert not app.exception
         assert not app.warning
         if app.success:
             break
-        assert app.button[-1].label.startswith("Confirm 2024 ")
+        assert app.button[-1].label.startswith(f"Confirm {spring.year} ")
         app.button[-1].click().run()
 
     assert not app.exception

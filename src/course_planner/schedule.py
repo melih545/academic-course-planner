@@ -2,8 +2,18 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from .constants import SEMESTER_LST
+
+LOCAL_TIMEZONE = ZoneInfo("Europe/Istanbul")
+
+
+def current_planning_term(today: date | None = None) -> Term:
+    today = today or datetime.now(LOCAL_TIMEZONE).date()
+    season = "Spring" if today.month <= 6 else "Summer" if today.month <= 8 else "Fall"
+    return Term(today.year, season)
 
 
 @dataclass(frozen=True)
