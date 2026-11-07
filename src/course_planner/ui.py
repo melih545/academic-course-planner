@@ -5,11 +5,13 @@ from collections.abc import Mapping
 import pandas as pd
 import streamlit as st
 
+from .calendar_export import export_calendar
 from .constants import ALL_LECTURES_PATH, COURSE_PLANS_PATH, GRADE_CREDITS, SEMESTER_LST
 from .curriculum import ELECTIVE_MINIMUMS, Curriculum, minimum_grades
 from .datasets import Dataset
 from .optimization import PlanResult, generate_schedule_options
 from .schedule import (
+    ConfirmedTerm,
     PlanningSession,
     PlanRequest,
     ScheduledSection,
@@ -95,6 +97,8 @@ def main() -> None:
         else:
             st.write(f"No courses selected for {confirmed.term}.")
 
+    render_calendar_download(session.confirmed, course_labels)
+
     if not remaining_count:
         st.success("All remaining curriculum requirements have been scheduled or completed.")
         return
@@ -134,6 +138,36 @@ def main() -> None:
 
     st.caption("Prerequisites scheduled in earlier terms are conditional on earning their minimum grades.")
     render_schedule_options(course_labels, curriculum, session, result.options)
+
+
+def render_calendar_download(
+    confirmed_terms: tuple[ConfirmedTerm, ...], course_labels: dict[str, str]
+) -> None:
+    terms = [confirmed for confirmed in confirmed_terms if any(
+        section.section.meetings for section in confirmed.sections
+    )]
+    if not terms:
+        return
+    with st.expander("Export a confirmed timetable (.ics)"):
+        confirmed = st.selectbox("Confirmed term", terms, format_func=lambda item: str(item.term))
+        st.caption("Choose the actual teaching dates. Events repeat weekly in Istanbul time.")
+        left, right = st.columns(2)
+        first_day = left.date_input("First teaching day", value=None)
+        last_day = right.date_input("Last teaching day", value=None)
+        if first_day is None or last_day is None:
+            return
+        try:
+            calendar = export_calendar(confirmed, course_labels, first_day, last_day)
+        except ValueError as error:
+            st.warning(str(error))
+            return
+        st.download_button(
+            "Download calendar",
+            calendar,
+            file_name=f"course-plan-{confirmed.term.year}-{confirmed.term.season.lower()}.ics",
+            mime="text/calendar",
+            on_click="ignore",
+        )
 
 
 def example_request(curriculum: Curriculum) -> PlanRequest:
