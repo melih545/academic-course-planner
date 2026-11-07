@@ -5,7 +5,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from .constants import SEMESTER_LST
+from .constants import DAY_MAP
+
+
+_TIME_RANGE = re.compile(r"(?:[01]\d|2[0-3])[0-5]\d/(?:[01]\d|2[0-3])[0-5]\d")
 
 
 PREREQUISITE_PATTERN = re.compile(
@@ -37,28 +40,38 @@ def split_days_and_times(row: pd.Series) -> list[pd.Series]:
     row = row.copy()
 
     if (
-        row["Days"] == "---"
-        or row["Times"] == "/"
-        or pd.isna(row["Days"])
+        pd.isna(row["Days"])
         or pd.isna(row["Times"])
-        or row["Instructors"] == "--"
+        or str(row["Days"]).strip("- ") == ""
+        or row["Times"] == "/"
     ):
         if "490" not in row["Code"]:
             return []
-        row["Days"] = "Pazartesi"
-        row["Times"] = "0000/0001"
+        row["Days"] = None
+        row["Times"] = None
+        row["StartTimeFloat"] = float("nan")
+        row["EndTimeFloat"] = float("nan")
+        return [row]
 
     days = str(row["Days"]).split()
     times = str(row["Times"]).split()
-
-    if len(days) != len(times):
-        times = times * len(days)
+    if len(times) == 1:
+        times *= len(days)
+    if len(days) != len(times) or not all(day in DAY_MAP for day in days):
+        return []
 
     expanded_rows: list[pd.Series] = []
     for day, time in zip(days, times):
+        if not _TIME_RANGE.fullmatch(time):
+            return []
+        start, end = map(time_to_float, time.split("/"))
+        if start >= end:
+            return []
         expanded_row = row.copy()
         expanded_row["Days"] = day
         expanded_row["Times"] = time
+        expanded_row["StartTimeFloat"] = start
+        expanded_row["EndTimeFloat"] = end
         expanded_rows.append(expanded_row)
 
     return expanded_rows
@@ -138,58 +151,6 @@ def calculate_open_rate(data: pd.DataFrame) -> pd.DataFrame:
     return course_counts
 
 
-def filter_recent_lectures(data: pd.DataFrame, current_year: int) -> pd.DataFrame:
-    data = data.copy()
-    recent_years = list(range(current_year - 2, current_year + 1))
-    data["Year"] = pd.to_numeric(data["Year"], errors="coerce")
-
-    recent_data = data[
-        data["Year"].isin(recent_years) & data["Term"].isin(SEMESTER_LST)
-    ].copy()
-
-    if recent_data.empty:
-        return data
-
-    recent_data["TermOrder"] = recent_data["Term"].map(
-        {term: index for index, term in enumerate(SEMESTER_LST)}
-    )
-    recent_data["CourseName"] = recent_data["CourseName"].str.replace(
-        "&", "and", regex=False
-    )
-
-    latest_codes = recent_data.sort_values(
-        ["Year", "TermOrder"], ascending=[False, False]
-    ).drop_duplicates(subset="CourseName", keep="first")[["CourseName", "Code"]]
-
-    latest_durations = recent_data.sort_values(
-        ["Year", "TermOrder"], ascending=[False, False]
-    ).drop_duplicates(subset="Code", keep="first")[
-        ["Code", "EndTimeFloat", "StartTimeFloat"]
-    ]
-    latest_durations["Duration"] = (
-        latest_durations["EndTimeFloat"] - latest_durations["StartTimeFloat"]
-    )
-    duration_dict = latest_durations.set_index("Code")["Duration"].to_dict()
-
-    recent_data = recent_data[
-        recent_data["Code"].isin(latest_codes["Code"])
-        & recent_data.apply(
-            lambda row: abs(
-                (row["EndTimeFloat"] - row["StartTimeFloat"])
-                - duration_dict.get(row["Code"], 0.0)
-            )
-            < 0.01,
-            axis=1,
-        )
-    ]
-
-    valid_combinations = recent_data[["Code", "Instructors"]].drop_duplicates()
-    if valid_combinations.empty:
-        return data
-
-    return data.merge(valid_combinations, on=["Code", "Instructors"], how="inner")
-
-
 def process_uploaded_files(
     uploaded_file: str | Path, necessary_lectures: pd.DataFrame
 ) -> pd.DataFrame:
@@ -209,91 +170,80 @@ def process_uploaded_files(
         inplace=True,
     )
 
-    filtered_data = data[
-        data["DepartmentRestrictions"].str.contains("ENDE", na=False)
-    ].copy()
-
     lecture_metadata = {
         row["Course Code"]: {
             "Credits": row["Credits"],
-            "Prerequisites": row["Prerequisites"],
+            "Prerequisites": prerequisites(row["Prerequisites"]),
             "Grade": int((float(str(row["Semester"]).split(".")[0]) + 1) // 2),
             "Type": row["Type"],
         }
         for _, row in necessary_lectures.iterrows()
     }
 
-    filtered_data = filtered_data[
-        filtered_data["Code"].isin(necessary_lectures["Course Code"])
-    ].copy()
+    filtered_data = data[data["Code"].isin(lecture_metadata)].copy()
     filtered_data = split_years(filtered_data)
 
+    # CRNs may be reused in other years or seasons. Missing CRNs identify only
+    # their own source row, whose meetings can still be kept together.
+    source_crns = filtered_data.get(
+        "CRN", pd.Series(index=filtered_data.index, dtype="string")
+    ).astype("string")
+    missing_crns = pd.Series(
+        [f"row-{index}" for index in filtered_data.index], index=filtered_data.index
+    )
+    filtered_data["SectionId"] = filtered_data.assign(
+        SourceCRN=source_crns.fillna(missing_crns)
+    ).groupby(["Code", "Year", "Term", "SourceCRN"], sort=False, dropna=False).ngroup()
+    filtered_data["Quota"] = pd.to_numeric(filtered_data["Quota"], errors="coerce")
+    filtered_data["Registered"] = pd.to_numeric(filtered_data["Registered"], errors="coerce")
+    eligible_rows = filtered_data["DepartmentRestrictions"].str.contains(r"\bENDE\b", na=False)
+
     expanded_rows: list[pd.Series] = []
-    for _, row in filtered_data.iterrows():
-        row["Credits"] = lecture_metadata[row["Code"]]["Credits"]
-        row["Prerequisites"] = prerequisites(
-            lecture_metadata[row["Code"]]["Prerequisites"]
+    for _, section in filtered_data.groupby("SectionId", sort=False):
+        eligible = section.loc[eligible_rows]
+        if eligible.empty:
+            continue
+        code = section["Code"].iloc[0]
+        if "490" not in code and not eligible["Quota"].ge(1).any():
+            continue
+        meetings = [split_days_and_times(row) for _, row in section.iterrows()]
+        if not all(meetings):
+            continue
+        for row_meetings in meetings:
+            for meeting in row_meetings:
+                for column, value in lecture_metadata[code].items():
+                    meeting[column] = value
+                expanded_rows.append(meeting)
+
+    if not expanded_rows:
+        return filtered_data.iloc[:0].assign(
+            StartTimeFloat=pd.Series(dtype=float), EndTimeFloat=pd.Series(dtype=float)
         )
-        row["Grade"] = lecture_metadata[row["Code"]]["Grade"]
-        row["Type"] = lecture_metadata[row["Code"]]["Type"]
-        expanded_rows.extend(split_days_and_times(row))
 
-    expanded_data = pd.DataFrame(expanded_rows)
-    if expanded_data.empty:
-        return expanded_data
-
-    expanded_data["StartTimeFloat"] = (
-        expanded_data["Times"].str.split("/").str[0].apply(time_to_float)
+    expanded_data = pd.DataFrame(expanded_rows).drop_duplicates(
+        subset=["SectionId", "Days", "StartTimeFloat", "EndTimeFloat"]
     )
-    expanded_data["EndTimeFloat"] = (
-        expanded_data["Times"].str.split("/").str[1].apply(time_to_float)
-    )
-
-    latest_year = pd.to_numeric(expanded_data["Year"], errors="coerce").max()
-    reference_year = int(latest_year) if pd.notna(latest_year) else 2023
-    expanded_data = filter_recent_lectures(expanded_data, reference_year)
-    expanded_data = expanded_data[expanded_data["EndTimeFloat"] <= 17.5].copy()
-    expanded_data["Registered"] = pd.to_numeric(
-        expanded_data["Registered"], errors="coerce"
-    )
-    expanded_data["Quota"] = pd.to_numeric(expanded_data["Quota"], errors="coerce")
-    expanded_data = expanded_data[
-        (expanded_data["Quota"] >= 1)
-        | (expanded_data["Code"].str.contains("490", na=False))
-    ].copy()
-
-    if expanded_data.empty:
-        return expanded_data
 
     open_rates = calculate_open_rate(expanded_data)
     expanded_data = expanded_data.merge(
         open_rates[["Term", "Code", "Open Rate"]], on=["Term", "Code"], how="left"
     )
     expanded_data = expanded_data.merge(
-        calculate_take_probability(expanded_data),
+        calculate_take_probability(expanded_data.drop_duplicates("SectionId")),
         on=["Term", "CourseName"],
         how="left",
     )
-    expanded_data = expanded_data.drop_duplicates(
-        subset=["Code", "Term", "Days", "StartTimeFloat"], keep="first"
-    ).reset_index(drop=True)
 
-    latest_names = expanded_data.sort_values(by="Year", ascending=False).drop_duplicates(
-        subset=["Code"], keep="first"
-    )
-    expanded_data = expanded_data.drop(columns=["CourseName"]).merge(
-        latest_names[["Code", "CourseName"]], on="Code", how="left"
-    )
-
-    rows_to_keep: list[int] = []
-    for index, row in expanded_data.iterrows():
-        if not any(
-            check_conflict(row, expanded_data.iloc[other_index])
-            for other_index in rows_to_keep
-            if row["Code"] == expanded_data.iloc[other_index]["Code"]
-            and row["Term"] == expanded_data.iloc[other_index]["Term"]
-            and row["Days"] == expanded_data.iloc[other_index]["Days"]
-        ):
-            rows_to_keep.append(index)
-
-    return expanded_data.iloc[rows_to_keep].reset_index(drop=True)
+    # Keep one historical example of each complete timetable, preferring the
+    # latest instance. Matching individual slots would splice different CRNs.
+    representatives = {}
+    for section_id, section in expanded_data.groupby("SectionId", sort=False):
+        first = section.iloc[0]
+        timetable = frozenset(
+            section[["Days", "Times"]].itertuples(index=False, name=None)
+        )
+        key = (first["Code"], first["Term"], timetable)
+        if key not in representatives or first["Year"] > representatives[key][0]:
+            representatives[key] = (first["Year"], section_id)
+    selected_ids = {section_id for _, section_id in representatives.values()}
+    return expanded_data[expanded_data["SectionId"].isin(selected_ids)].reset_index(drop=True)
