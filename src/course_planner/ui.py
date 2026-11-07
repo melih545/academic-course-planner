@@ -106,6 +106,15 @@ def main() -> None:
                 return
     result: PlanResult = st.session_state.result
     st.subheader(f"Planning for {current_term}")
+    if result.status in {"time_limit", "interrupted"}:
+        reason = "reached its time limit" if result.status == "time_limit" else "stopped early"
+        detail = (
+            "Showing the feasible options found so far."
+            if result.options else "No feasible option was found before the search stopped."
+        )
+        st.warning(f"The planner {reason}. {detail}")
+        if not result.options:
+            return
     if result.issues:
         issues = "\n".join(f"- {issue}" for issue in result.issues)
         st.warning(f"No feasible schedule was found.\n\n{issues}")

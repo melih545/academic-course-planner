@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable, Sequence, Set
 from dataclasses import dataclass
+from time import monotonic
+from typing import Literal
 
 from .constants import MAX_SOLUTIONS
 from .curriculum import (
@@ -16,6 +18,9 @@ from .curriculum import (
 
 from .schedule import PlanRequest, ScheduledSection, Section
 
+
+SOLVE_BUDGET_SECONDS = 8.0
+
 try:
     from pyscipopt import Expr, Model, quicksum
 except ModuleNotFoundError:
@@ -26,6 +31,7 @@ except ModuleNotFoundError:
 class PlanResult:
     options: list[list[ScheduledSection]]
     issues: tuple[str, ...] = ()
+    status: Literal["solved", "infeasible", "time_limit", "interrupted"] = "solved"
 
 
 def generate_schedule_options(
@@ -35,6 +41,7 @@ def generate_schedule_options(
     *,
     curriculum: Curriculum,
     confirmed_courses: Set[str] = frozenset(),
+    time_limit_seconds: float = SOLVE_BUDGET_SECONDS,
 ) -> PlanResult:
     if Model is None:
         raise RuntimeError(
@@ -42,6 +49,8 @@ def generate_schedule_options(
         )
     if max_solutions < 1:
         raise ValueError("At least one schedule option must be requested.")
+    if time_limit_seconds <= 0:
+        raise ValueError("The solve time limit must be positive.")
 
     terms = request.terms()
     completed_grades = request.completed_grades
@@ -103,10 +112,11 @@ def generate_schedule_options(
                 if curriculum.courses[code].category == category
             )
     if issues:
-        return PlanResult([], tuple(issues))
+        return PlanResult([], tuple(issues), "infeasible")
     if not required and not any(deficits.values()):
         return PlanResult([[]])
 
+    deadline = monotonic() + time_limit_seconds
     model = Model("Course_Planner")
     model.hideOutput()
     section_vars = {
@@ -133,7 +143,10 @@ def generate_schedule_options(
                 ) >= deficit
             )
 
-    conflicts = _section_conflicts(sections)
+    candidate_sections = {
+        scheduled.section for candidates in candidates_by_term.values() for scheduled in candidates
+    }
+    conflicts = _section_conflicts(candidate_sections)
     used_terms = {}
     prior_vars = defaultdict(list)
     for term, candidates in candidates_by_term.items():
@@ -173,25 +186,37 @@ def generate_schedule_options(
 
     options = []
     for index in range(max_solutions):
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return PlanResult(options, status="time_limit")
+        model.setRealParam("limits/time", remaining)
         model.optimize()
-        if model.getStatus() != "optimal":
+        status = model.getStatus()
+        if status == "infeasible":
             break
-        solution = model.getBestSol()
-        selected = [
-            section for section, variable in section_vars.items()
-            if model.getSolVal(solution, variable) > 0.5
-        ]
-        options.append(selected)
+        if model.getNSols():
+            solution = model.getBestSol()
+            selected = [
+                section for section, variable in section_vars.items()
+                if model.getSolVal(solution, variable) > 0.5
+            ]
+            options.append(selected)
+        if status == "timelimit":
+            return PlanResult(options, status="time_limit")
+        if status != "optimal":
+            return PlanResult(options, status="interrupted")
         if index + 1 == max_solutions:
             break
         model.freeTransform()
         model.addCons(quicksum(section_vars[section] for section in selected) <= len(selected) - 1)
 
     if not options:
-        return PlanResult([], (
-            "No feasible schedule fits the prerequisites, timetable conflicts, "
-            "elective requirements, and ten-course limit per term in this window.",
-        ))
+        return PlanResult(
+            [],
+            ("No feasible schedule fits the prerequisites, timetable conflicts, "
+             "elective requirements, and ten-course limit per term in this window.",),
+            "infeasible",
+        )
     return PlanResult(options)
 
 
@@ -234,7 +259,7 @@ def _rule_support(
     return satisfied
 
 
-def _section_conflicts(sections: Sequence[Section]) -> dict[str, set[tuple[int, int]]]:
+def _section_conflicts(sections: Set[Section]) -> dict[str, set[tuple[int, int]]]:
     meetings_by_day = defaultdict(list)
     for section in sections:
         for meeting in section.meetings:

@@ -3,6 +3,7 @@ from pathlib import Path
 import pandas as pd
 from streamlit.testing.v1 import AppTest
 
+from course_planner import optimization
 from course_planner.curriculum import Curriculum
 from course_planner.optimization import generate_schedule_options
 from course_planner.schedule import Meeting, PlanRequest, Section, Term
@@ -150,6 +151,29 @@ def test_electives_are_counted_from_catalog_and_completed_or_confirmed_courses()
     result = plan(rows, courses, completed, confirmed_courses={"END 303E"})
     assert [[section.code for section in option] for option in result.options] == [["END 305E"]]
     assert plan(rows, courses, completed, confirmed_courses={"END 303E", "END 304E"}).options == [[]]
+
+
+def test_time_limit_without_an_option_is_distinct_from_infeasibility(monkeypatch):
+    times = iter((0.0, 9.0))
+    monkeypatch.setattr(optimization, "monotonic", lambda: next(times))
+
+    result = plan([meeting("END 101E", 101)], [("END 101E", "Main", None)])
+
+    assert result.status == "time_limit"
+    assert not result.options
+
+
+def test_time_limit_keeps_feasible_options_already_found(monkeypatch):
+    times = iter((0.0, 1.0, 9.0))
+    monkeypatch.setattr(optimization, "monotonic", lambda: next(times))
+
+    result = plan(
+        [meeting("END 101E", 101), meeting("END 101E", 102, day="Salı")],
+        [("END 101E", "Main", None)],
+    )
+
+    assert result.status == "time_limit"
+    assert len(result.options) == 1
 
 
 def test_default_calculate_explains_why_the_plan_cannot_be_built():
