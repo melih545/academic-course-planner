@@ -6,7 +6,13 @@ import pandas as pd
 import streamlit as st
 
 from .calendar_export import export_calendar
-from .constants import ALL_LECTURES_PATH, COURSE_PLANS_PATH, GRADE_CREDITS, SEMESTER_LST
+from .constants import (
+    ALL_LECTURES_PATH,
+    COURSE_PLANS_PATH,
+    GRADE_CREDITS,
+    SEMESTER_LST,
+    WEEKDAYS,
+)
 from .curriculum import ELECTIVE_MINIMUMS, Curriculum, minimum_grades
 from .datasets import Dataset
 from .optimization import PlanResult, generate_schedule_options
@@ -113,7 +119,7 @@ def main() -> None:
             try:
                 st.session_state.result = generate_schedule_options(
                     dataset.sections,
-                    PlanRequest(current_term, session.request.end, completed_grades),
+                    session.remaining_request(),
                     curriculum=curriculum,
                     confirmed_courses=session.confirmed_codes,
                 )
@@ -238,6 +244,25 @@ def render_configuration_form(
                 index=SEMESTER_LST.index(end.season),
             )
 
+        credit_col, day_col, summer_col = st.columns(3)
+        max_credits = credit_col.number_input(
+            "Maximum credits per term",
+            min_value=1,
+            value=session.request.max_credits if session else None,
+            help="Leave blank to keep only the ten-course cap.",
+        )
+        day = session.request.preferred_free_day if session else None
+        preferred_free_day = day_col.selectbox(
+            "Preferred free day",
+            options=[None, *WEEKDAYS],
+            index=WEEKDAYS.index(day) + 1 if day else 0,
+            format_func=lambda day: day or "No preference",
+            help="A preference used to rank otherwise equivalent plans.",
+        )
+        allow_summer = summer_col.checkbox(
+            "Allow summer terms", value=session.request.allow_summer if session else True
+        )
+
         submitted = st.form_submit_button("Calculate")
 
     if not submitted:
@@ -253,7 +278,12 @@ def render_configuration_form(
     }
     try:
         return PlanRequest(
-            Term(current_year, current_semester), Term(last_year, last_semester), completed
+            Term(current_year, current_semester),
+            Term(last_year, last_semester),
+            completed,
+            max_credits=max_credits,
+            preferred_free_day=preferred_free_day,
+            allow_summer=allow_summer,
         )
     except ValueError as error:
         st.error(str(error))

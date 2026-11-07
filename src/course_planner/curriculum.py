@@ -123,6 +123,7 @@ class Course:
     category: str
     prerequisite: Prerequisite | None
     prerequisite_text: str
+    credits: float = 0
 
 
 @dataclass(frozen=True)
@@ -140,11 +141,11 @@ class Curriculum:
     @classmethod
     def from_frame(cls, data: pd.DataFrame) -> Curriculum:
         courses = {}
-        for code, category, text in data[
-            ["Course Code", "Type", "Prerequisites"]
+        for code, category, text, credits in data[
+            ["Course Code", "Type", "Prerequisites", "Credits"]
         ].itertuples(index=False, name=None):
             courses[code] = Course(
-                category, parse_prerequisite(text), "" if pd.isna(text) else str(text)
+                category, parse_prerequisite(text), "" if pd.isna(text) else str(text), float(credits)
             )
         return cls(courses)
 

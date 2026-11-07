@@ -5,7 +5,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from .constants import SEMESTER_LST
+from .constants import DAY_MAP, SEMESTER_LST
 
 LOCAL_TIMEZONE = ZoneInfo("Europe/Istanbul")
 
@@ -66,16 +66,25 @@ class PlanRequest:
     start: Term
     end: Term
     completed_grades: Mapping[str, str]
+    max_credits: int | None = None
+    preferred_free_day: str | None = None
+    allow_summer: bool = True
 
     def __post_init__(self) -> None:
         if self.end.position < self.start.position:
             raise ValueError("The finish semester must not be earlier than the current semester.")
+        if not self.allow_summer and self.start == self.end and self.start.season == "Summer":
+            raise ValueError("The window must include a non-summer term when summer is disabled.")
+        if self.max_credits is not None and self.max_credits < 1:
+            raise ValueError("The credit limit must be positive.")
+        if self.preferred_free_day is not None and self.preferred_free_day not in DAY_MAP:
+            raise ValueError("Choose a valid preferred free day.")
 
     def terms(self) -> list[Term]:
         terms = [self.start]
         while terms[-1] != self.end:
             terms.append(terms[-1].next())
-        return terms
+        return [term for term in terms if self.allow_summer or term.season != "Summer"]
 
 
 @dataclass(frozen=True)
@@ -91,7 +100,11 @@ class PlanningSession:
 
     @property
     def current_term(self) -> Term:
-        return self.confirmed[-1].term.next() if self.confirmed else self.request.start
+        term = self.confirmed[-1].term.next() if self.confirmed else self.request.start
+        return term.next() if term.season == "Summer" and not self.request.allow_summer else term
+
+    def remaining_request(self) -> PlanRequest:
+        return replace(self.request, start=self.current_term)
 
     @property
     def confirmed_codes(self) -> set[str]:

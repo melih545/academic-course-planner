@@ -152,6 +152,11 @@ def generate_schedule_options(
         used_terms[term] = used
         term_vars = {section.section.id: section_vars[section] for section in candidates}
         model.addCons(quicksum(term_vars.values()) <= 10 * used)
+        if request.max_credits is not None:
+            model.addCons(quicksum(
+                curriculum.courses[section.code].credits * section_vars[section]
+                for section in candidates
+            ) <= request.max_credits)
         for first, second in conflicts[term.season]:
             if first in term_vars and second in term_vars:
                 model.addCons(term_vars[first] + term_vars[second] <= 1)
@@ -176,11 +181,17 @@ def generate_schedule_options(
         if left.season == "Summer" and index > 0:
             left = terms[index - 1]
         model.addCons(used_terms[left] >= used_terms[right])
-    model.setObjective(
+    objective = (
         (len(curriculum.courses) + 1) * quicksum(used_terms.values())
-        + quicksum(section_vars.values()),
-        "minimize",
+        + quicksum(section_vars.values())
     )
+    if request.preferred_free_day is not None:
+        on_preferred_day = quicksum(
+            variable for scheduled, variable in section_vars.items()
+            if any(meeting.day == request.preferred_free_day for meeting in scheduled.section.meetings)
+        )
+        objective = (len(curriculum.courses) + 1) * objective + on_preferred_day
+    model.setObjective(objective, "minimize")
 
     options = []
     for index in range(max_solutions):
@@ -209,10 +220,13 @@ def generate_schedule_options(
         model.addCons(quicksum(section_vars[section] for section in selected) <= len(selected) - 1)
 
     if not options:
+        credit_rule = (
+            f" and {request.max_credits}-credit limit" if request.max_credits is not None else ""
+        )
         return PlanResult(
             [],
-            ("No feasible schedule fits the prerequisites, timetable conflicts, "
-             "elective requirements, and ten-course limit per term in this window.",),
+            (f"No feasible schedule fits the prerequisites, timetable conflicts, "
+             f"elective requirements, and ten-course limit{credit_rule} per term in this window.",),
             "infeasible",
         )
     return PlanResult(options)

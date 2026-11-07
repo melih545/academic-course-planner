@@ -22,8 +22,11 @@ def meeting(code, section_id, day="Pazartesi", term="Spring", start=9.0, end=10.
     }
 
 
-def plan(rows, courses, completed=None, end_term="Spring", **kwargs):
+def plan(
+    rows, courses, completed=None, end_term="Spring", *, request_options=None, credits=None, **kwargs
+):
     catalog = pd.DataFrame(courses, columns=["Course Code", "Type", "Prerequisites"])
+    catalog["Credits"] = catalog["Course Code"].map(credits or {}).fillna(3)
     sections = {}
     for row in rows:
         key = (row["SectionId"], row["Code"], row["Term"])
@@ -32,7 +35,9 @@ def plan(rows, courses, completed=None, end_term="Spring", **kwargs):
         )
     return generate_schedule_options(
         [Section(*key, tuple(meetings)) for key, meetings in sections.items()],
-        PlanRequest(Term(2026, "Spring"), Term(2026, end_term), completed or {}),
+        PlanRequest(
+            Term(2026, "Spring"), Term(2026, end_term), completed or {}, **(request_options or {})
+        ),
         curriculum=Curriculum.from_frame(catalog),
         **kwargs,
     )
@@ -173,6 +178,36 @@ def test_time_limit_keeps_feasible_options_already_found(monkeypatch):
 
     assert result.status == "time_limit"
     assert len(result.options) == 1
+
+
+def test_credit_limit_is_a_hard_constraint():
+    rows = [meeting("END 101E", 101)]
+    courses = [("END 101E", "Main", None)]
+
+    result = plan(rows, courses, request_options={"max_credits": 2})
+
+    assert result.status == "infeasible"
+    assert "2-credit limit" in result.issues[0]
+    assert plan(rows, courses, request_options={"max_credits": 3}).options
+
+
+def test_free_day_preference_ranks_equivalent_sections():
+    rows = [meeting("END 101E", 101), meeting("END 101E", 102, day="Salı")]
+    courses = [("END 101E", "Main", None)]
+
+    result = plan(rows, courses, request_options={"preferred_free_day": "Pazartesi"})
+
+    assert [option[0].section.id for option in result.options] == [102, 101]
+
+
+def test_disabling_summer_excludes_summer_only_sections():
+    rows = [meeting("END 101E", 101, term="Summer")]
+    courses = [("END 101E", "Main", None)]
+
+    result = plan(rows, courses, end_term="Fall", request_options={"allow_summer": False})
+
+    assert result.status == "infeasible"
+    assert plan(rows, courses, end_term="Fall").options
 
 
 def test_default_calculate_explains_why_the_plan_cannot_be_built():
