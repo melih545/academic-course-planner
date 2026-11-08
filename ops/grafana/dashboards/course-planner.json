@@ -1,0 +1,196 @@
+{
+  "uid": "course-planner",
+  "title": "Course Planner",
+  "schemaVersion": 39,
+  "tags": [
+    "course-planner"
+  ],
+  "timezone": "browser",
+  "refresh": "15s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Planning outcomes per minute",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "course-planner-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (status) (rate(course_planner_plans_total[5m])) * 60",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "course-planner-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "title": "Solve time p95",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "course-planner-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(course_planner_solve_duration_seconds_bucket[5m])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "course-planner-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "title": "Published data age",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "course-planner-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "course_planner_published_data_age_seconds",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "course-planner-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "title": "Import attempts by outcome",
+      "type": "bargauge",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "course-planner-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "course_planner_import_runs_total",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "course-planner-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "title": "Planning database reachable",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "course-planner-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "course_planner_database_up",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "course-planner-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "title": "Last successful import",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "course-planner-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "course_planner_last_successful_import_timestamp_seconds * 1000",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "course-planner-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeAsIso"
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

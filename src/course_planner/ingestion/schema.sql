@@ -92,3 +92,12 @@ CREATE TABLE IF NOT EXISTS itu_meetings (
     PRIMARY KEY (snapshot_id, crn, weekday, start_minute, end_minute),
     FOREIGN KEY (snapshot_id, crn) REFERENCES itu_sections (snapshot_id, crn)
 );
+
+CREATE TABLE IF NOT EXISTS itu_import_runs (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    started_at timestamptz NOT NULL,
+    finished_at timestamptz NOT NULL,
+    status text NOT NULL CHECK (status IN ('succeeded', 'invalid_source', 'source_unavailable', 'database_error')),
+    snapshot_id bigint REFERENCES itu_snapshots (id),
+    CHECK ((status = 'succeeded') = (snapshot_id IS NOT NULL))
+);

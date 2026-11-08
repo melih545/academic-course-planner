@@ -82,6 +82,17 @@ Open Streamlit at http://localhost:8501 and select **Published İTÜ data**. If 
 
 A published term only uses the exact sections from its snapshot. A later term can use an older same-season snapshot as a labelled forecast. Missing coverage, absent sections and unmet prerequisites are reported separately. Unlisted or unsupported eligibility rules are reported as missing evidence. In the published UI, only confirm ING 100 eligibility if you have verified it with İTÜ.
 
+## Monitor the data pipeline
+
+```bash
+docker compose --profile monitoring up -d --build api prometheus grafana
+docker compose run --rm --build ingest
+```
+
+Prometheus scrapes the planning API at `/metrics`. Open Grafana at http://localhost:3000 and select **Course Planner**. The local default login is `admin` with password `course_planner`. Set `COURSE_PLANNER_GRAFANA_PASSWORD` before the first start to choose a different password.
+
+The dashboard shows solver outcomes and latency, data age, the last successful import and import outcomes. Import outcomes are recorded in PostgreSQL so they remain available after the importer exits. Application events are emitted as JSON without completed-course inputs.
+
 ## Code layout
 
 The Streamlit entry point is [app.py](app.py). The [planning package](src/course_planner) contains the CSV pipeline, curriculum rules, scheduling domain, solver, and calendar export. [Tests](tests) cover the planner and the application flow with bundled data.

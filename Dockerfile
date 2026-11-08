@@ -28,3 +28,10 @@ RUN uv sync --locked --no-dev
 COPY app.py ./
 COPY data ./data
 CMD ["streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.headless=true", "--browser.gatherUsageStats=false"]
+
+FROM prom/prometheus:v3.5.0 AS prometheus
+COPY ops/prometheus.yml /etc/prometheus/prometheus.yml
+
+FROM grafana/grafana:12.1.0 AS grafana
+COPY ops/grafana/provisioning /etc/grafana/provisioning
+COPY ops/grafana/dashboards /etc/grafana/dashboards

@@ -127,3 +127,26 @@ def test_api_plans_against_a_pinned_imported_snapshot(database, snapshot, monkey
         pinned = client.post("/v1/plans", json={**payload, "snapshot_ids": [first.snapshot_id]}).json()
         assert pinned["snapshot_ids"] == [first.snapshot_id]
         assert pinned["options"][0][0]["section"]["crn"] == 12345
+
+
+def test_prometheus_reports_import_outcomes_and_data_age(database, snapshot, monkeypatch):
+    from contextlib import contextmanager
+
+    from course_planner import metrics_view
+    from course_planner.ingestion.audit import record_import
+
+    @contextmanager
+    def connection():
+        yield database
+
+    imported = import_snapshot(database, snapshot)
+    record_import(database, snapshot.observed_at, "succeeded", imported.snapshot_id)
+    record_import(database, snapshot.observed_at, "invalid_source")
+    monkeypatch.setattr(metrics_view, "connect", connection)
+
+    output = metrics_view.scrape_metrics().decode()
+
+    assert 'course_planner_import_runs_total{status="succeeded"} 1.0' in output
+    assert 'course_planner_import_runs_total{status="invalid_source"} 1.0' in output
+    assert "course_planner_published_data_age_seconds " in output
+    assert "course_planner_database_up 1.0" in output

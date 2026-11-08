@@ -39,6 +39,10 @@ class SourceError(ValueError):
     """The public source was unavailable or returned an unexpected structure."""
 
 
+class FetchError(SourceError):
+    """An HTTP or transport failure prevented reading the source."""
+
+
 @dataclass(frozen=True)
 class Course:
     code: str
@@ -129,14 +133,14 @@ def fetch_public(url: str) -> str:
                 return body.decode("utf-8-sig")
         except HTTPError as error:
             if error.code not in {429, 500, 502, 503, 504} or attempt == 2:
-                raise SourceError(f"HTTP {error.code}: {url}") from error
+                raise FetchError(f"HTTP {error.code}: {url}") from error
             retry_after = error.headers.get("Retry-After")
             if retry_after and (not retry_after.isdigit() or int(retry_after) > 30):
-                raise SourceError(f"Source requested a later retry: {url}") from error
+                raise FetchError(f"Source requested a later retry: {url}") from error
             sleep(max(2**attempt, int(retry_after or 0)))
         except (URLError, OSError, HTTPException) as error:
             if attempt == 2:
-                raise SourceError(f"Request failed: {url}") from error
+                raise FetchError(f"Request failed: {url}") from error
             sleep(2**attempt)
         except UnicodeError as error:
             raise SourceError(f"Expected a UTF-8 response: {url}") from error

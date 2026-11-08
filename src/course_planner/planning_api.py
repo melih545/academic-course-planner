@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from time import monotonic
 from typing import Annotated, Literal
 
 import psycopg
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
+from prometheus_client import CONTENT_TYPE_LATEST
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from .curriculum import GRADE_ORDER, matched_requirements, minimum_grades
+from .metrics_view import scrape_metrics
 from .optimization import PlanIssue, generate_schedule_options
 from .planning_data import (
     DataUnavailable,
@@ -21,6 +24,7 @@ from .planning_data import (
     verified_curriculum,
 )
 from .schedule import PlanRequest, ScheduledSection, Term
+from .telemetry import PLAN_RUNS, SOLVE_DURATION, event
 
 LOGGER = logging.getLogger(__name__)
 CourseCode = Annotated[str, StringConstraints(pattern=r"^[A-Z]+ [0-9]+[A-Z]*$", max_length=24)]
@@ -108,6 +112,22 @@ def read_dataset(snapshot_ids: tuple[int, ...] = ()) -> PlanningData:
 
 
 def solve_plan(data: PlanningData, payload: PlanInput) -> PlanResponse:
+    started = monotonic()
+    try:
+        result = _solve_plan(data, payload)
+    except Exception:
+        PLAN_RUNS.labels("error").inc()
+        event("plan_failed", level=logging.ERROR)
+        raise
+    finally:
+        SOLVE_DURATION.observe(monotonic() - started)
+    PLAN_RUNS.labels(result.status).inc()
+    event("plan_completed", status=result.status, duration_seconds=round(monotonic() - started, 4),
+          snapshots=result.snapshot_ids, options=len(result.options))
+    return result
+
+
+def _solve_plan(data: PlanningData, payload: PlanInput) -> PlanResponse:
     request = payload.to_domain()
     curriculum = verified_curriculum(data.curriculum, payload.english_eligible)
     coverage = []
@@ -148,6 +168,11 @@ app = FastAPI(title="Course Planner API", version="1.0.0")
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics() -> Response:
+    return Response(scrape_metrics(), headers={"Content-Type": CONTENT_TYPE_LATEST})
 
 
 @app.get("/v1/catalogue", response_model=Catalogue)

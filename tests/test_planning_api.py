@@ -111,3 +111,19 @@ def test_streamlit_published_mode_uses_api_and_confirms_the_returned_section(mon
         next(button for button in ui.button if button.label == "Confirm 2026 Fall").click().run()
         assert not ui.exception
         assert any("curriculum requirements" in item.value for item in ui.success)
+
+
+def test_successful_plan_exposes_counter_and_duration_metrics(monkeypatch):
+    from prometheus_client import generate_latest
+
+    from course_planner.telemetry import PLAN_RUNS, REGISTRY
+
+    monkeypatch.setattr(planning_api, "scrape_metrics", lambda: generate_latest(REGISTRY))
+    monkeypatch.setattr(planning_api, "read_dataset", lambda ids=(): _data())
+    before = REGISTRY.get_sample_value("course_planner_plans_total", {"status": "solved"}) or 0
+    PLAN_RUNS.labels("solved")
+    with TestClient(planning_api.app) as client:
+        assert client.post("/v1/plans", json=_payload(FALL)).status_code == 200
+        output = client.get("/metrics")
+    assert f'course_planner_plans_total{{status="solved"}} {before + 1}' in output.text
+    assert "course_planner_solve_duration_seconds_count " in output.text
