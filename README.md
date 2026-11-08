@@ -37,7 +37,7 @@ For your own plan, enter completed courses, any applicable grade overrides and a
 
 ## Data and CSV uploads
 
-The bundled [curriculum](data/course_plans.csv) and [lecture archive](data/all_lectures.csv) are historical snapshots. The archive contains 12,194 rows from 2017 Summer through 2022 Fall. Future timetables are projections from that archive. The repository history does not record the original extraction or redistribution terms for the CSVs. The [MIT license](LICENSE) applies to the application code. For official curriculum information, consult the [İTÜ Registrar's course-plan listing](https://obs.itu.edu.tr/public/DersPlan/DersPlanDetay/1427).
+The bundled [curriculum](data/course_plans.csv) and [lecture archive](data/all_lectures.csv) are historical snapshots. The archive contains 12,194 rows from 2017 Summer through 2022 Fall. Future timetables are projections from that archive. The repository history does not record the original extraction or redistribution terms for the CSVs. The [MIT license](LICENSE) applies to the application code. For official curriculum information, consult the [İTÜ Registrar's ENDE_LS course-plan listing](https://obs.itu.edu.tr/public/DersPlan/DersPlanlariList?planTipiKodu=lisans&programKodu=ENDE_LS).
 
 Choose **Use my CSV files** to replace either input in the current session. Use comma-separated UTF-8 files up to 5 MiB and 50,000 rows each. The bundled CSVs and [small test fixtures](tests/fixtures) show the formats.
 
@@ -47,6 +47,28 @@ Choose **Use my CSV files** to replace either input in the current session. Use 
 | Lecture history | `Kod`, `Ders`, `Eğitmen(ler)`, `Gün`, `Saat`, `Bina`, `Kayıtlı`, `Kontenjan`, `Bölüm sınırlaması`, `Term` |
 
 Use terms such as `2025 - 2026 Güz Dönemi`. When several rows belong to the same section, include a shared `CRN` so the planner can group their meetings. You can set the department filter and elective targets for the selected data.
+
+## Import published İTÜ data
+
+The ingestion command collects the [ENDE_LS plan](https://obs.itu.edu.tr/public/DersPlan/DersPlanDetay/1551), its elective groups, listed prerequisites and the [active undergraduate timetable](https://obs.itu.edu.tr/public/DersProgram). This is a separate data pipeline. The Streamlit planner currently reads its bundled or uploaded CSVs.
+
+```bash
+docker compose up -d --wait db
+docker compose run --rm ingest
+docker compose run --rm db-test
+```
+
+In WSL without Docker Desktop integration, use `docker.exe compose -f "$(wslpath -w "$PWD/compose.yaml")"` in place of `docker compose`.
+
+The importer prints the active term, snapshot ID, record counts and whether it created a new snapshot. Reimporting identical normalized content reuses its snapshot ID, even when the collection time changes. A change in source data, such as updated enrollment, creates a new version. A failed scrape or database transaction leaves the last active version available. PostgreSQL stores the data in the Compose volume `db_data`.
+
+The import preserves full periods, CRNs, weekly meetings, section eligibility, course alternatives and source URLs. A missing entry in the prerequisite list means the rule is unlisted. Elective options without a full course code are recorded separately on their requirement. To see the current snapshot for each imported period, run the following command.
+
+```bash
+docker compose exec db psql -U course_planner -d course_planner -c 'SELECT program, term_year, season, snapshot_id, observed_at FROM itu_active_snapshots ORDER BY observed_at DESC'
+```
+
+`db-test` runs the parser and PostgreSQL tests against deterministic fixtures in a separate database schema. The tests cover duplicate imports, rollback on invalid data and protection against an older collection replacing the active version.
 
 ## Code layout
 

@@ -13,6 +13,21 @@ jobs:
     timeout-minutes: 10
     env:
       MPLBACKEND: Agg
+      COURSE_PLANNER_TEST_DSN: postgresql://course_planner:course_planner@127.0.0.1:5432/course_planner
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: course_planner
+          POSTGRES_PASSWORD: course_planner
+          POSTGRES_DB: course_planner
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U course_planner -d course_planner"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9

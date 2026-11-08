@@ -1,0 +1,47 @@
+name: course-planner-ingestion
+
+x-database-env: &database-env
+  PGHOST: db
+  PGUSER: course_planner
+  PGPASSWORD: course_planner
+  PGDATABASE: course_planner
+
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: course_planner
+      POSTGRES_PASSWORD: course_planner
+      POSTGRES_DB: course_planner
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "course_planner", "-d", "course_planner"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    volumes:
+      - db_data:/var/lib/postgresql
+
+  ingest:
+    profiles: [tools]
+    build:
+      context: .
+      target: ingest
+    environment: *database-env
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db-test:
+    profiles: [test]
+    build:
+      context: .
+      target: test
+    environment:
+      <<: *database-env
+      COURSE_PLANNER_TEST_DSN: postgresql://course_planner:course_planner@db/course_planner
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  db_data:
