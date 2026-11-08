@@ -109,3 +109,16 @@ def test_collect_preserves_plan_requirements_and_source_provenance():
     assert snapshot.requirements[-2].unresolved_options == ("JPN — Japanese I",)
     assert snapshot.rules == (itu.Rule("END 102E", "END 101E MIN. DD", "2. sınıf", rules_url),)
     assert set(snapshot.source_urls) == set(sources)
+
+
+def test_course_detail_fallback_requires_matching_course_and_explicit_rule_fields():
+    detail = _table(("Ders Kodu", "Ders Adı"), [("MEK205 - MEK205E", "Mechanics")])
+    detail += _table(("Önşartlar", "Değer"), [
+        ("Ders Önşartları", "( MAT 102E MIN. DD ) Veya ( MAT 104E MIN. DD )"),
+        ("Başarılan Kredi/Sınıf Önşartı", "Yok"),
+    ])
+    assert itu._parse_course_rule(detail, "MEK 205E", "detail") == itu.Rule(
+        "MEK 205E", "( MAT 102E MIN. DD ) Veya ( MAT 104E MIN. DD )", "Yok", "detail"
+    )
+    assert itu._parse_course_rule(detail, "MEK 207E", "detail") is None
+    assert itu._parse_course_rule(detail.replace("Ders Önşartları", "unknown"), "MEK 205E", "detail") is None

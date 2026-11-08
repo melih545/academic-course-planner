@@ -185,17 +185,25 @@ def collect_snapshot(fetch: Callable[[str], str] = fetch_public) -> Snapshot:
                 _add_unique(rules, rule.code, rule, "prerequisite rule")
     if not sections or not any(PROGRAM in (section.allowed_programs or ()) for section in sections.values()):
         raise SourceError(f"No eligible {PROGRAM} sections found in the published term")
-    if parse_term(get(TERM_URL)) != (label, year, season):
-        raise SourceError("The active term changed during collection. Retry the import.")
     applicable = {}
     for section in sections.values():
         if PROGRAM in (section.allowed_programs or ()) and section.quota and section.meetings:
             applicable.setdefault(section.course_code, []).append(section)
     for code, candidates in applicable.items():
-        if code not in rules and all(section.no_prerequisite_reported for section in candidates):
+        if code in rules or code == "ING 100":
+            continue
+        if all(section.no_prerequisite_reported for section in candidates):
             rules[code] = Rule(code, "", "", candidates[0].source_url)
+        else:
+            branch, number = code.split()
+            query = urlencode({"bransKodu": branch, "dersNo": number})
+            url = f"{BASE}/public/DersBilgi/DersBilgiSearch?{query}"
+            if rule := _parse_course_rule(get(url), code, url):
+                rules[code] = rule
     if "ING 100" in codes:
         rules["ING 100"] = Rule("ING 100", "", ING100_ELIGIBILITY, ING100_SOURCE)
+    if parse_term(get(TERM_URL)) != (label, year, season):
+        raise SourceError("The active term changed during collection. Retry the import.")
     return Snapshot(
         PROGRAM, PLAN_ID, title, label, year, season, observed_at,
         tuple(sorted(courses, key=lambda course: course.code)), tuple(requirements),
@@ -342,6 +350,35 @@ def _parse_rules(body: str, codes: set[str], source: str) -> list[Rule]:
         if code in codes:
             rules.append(Rule(code, _text(cells[2]), _text(cells[3]), source))
     return rules
+
+
+def _parse_course_rule(body: str, code: str, source: str) -> Rule | None:
+    soup = BeautifulSoup(body, "html.parser")
+    for table in soup.find_all("table"):
+        headers = table.select(":scope > thead > tr > th")
+        if not headers or _text(headers[0]) != "Ders Kodu":
+            continue
+        row = table.select_one(":scope > tbody > tr > td")
+        aliases = re.findall(r"[A-Z]+\s*\d+[A-Z]*", _text(row)) if row else ()
+        if code.replace(" ", "") in {item.replace(" ", "") for item in aliases}:
+            break
+    else:
+        return None
+
+    cells_by_label = {}
+    for row in soup.find_all("tr"):
+        cells = row.find_all("td", recursive=False)
+        if len(cells) == 2:
+            label, value = map(_text, cells)
+            cells_by_label[label] = value
+    course_rule = cells_by_label.get("Ders Önşartları")
+    standing_rule = cells_by_label.get("Başarılan Kredi/Sınıf Önşartı")
+    if course_rule is None or standing_rule is None:
+        return None
+    return Rule(
+        code, "" if course_rule in EMPTY else course_rule,
+        "" if standing_rule in EMPTY else standing_rule, source,
+    )
 
 
 def parse_sections(body: str, codes: set[str], source: str) -> tuple[Section, ...]:

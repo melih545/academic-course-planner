@@ -62,7 +62,7 @@ In WSL without Docker Desktop integration, use `docker.exe compose -f "$(wslpath
 
 The importer prints the active term, snapshot ID, record counts and whether it created a new snapshot. Reimporting identical normalized content reuses its snapshot ID, even when the collection time changes. A change in source data, such as updated enrollment, creates a new version. A failed scrape or database transaction leaves the last active version available. PostgreSQL stores the data in the Compose volume `db_data`.
 
-The import preserves full periods, CRNs, weekly meetings, section eligibility, course alternatives and source URLs. A missing entry in the prerequisite list means the rule is unlisted. Elective options without a full course code are recorded separately on their requirement. To see the current snapshot for each imported period, run the following command.
+The import preserves full periods, CRNs, weekly meetings, section eligibility, course alternatives and source URLs. If an applicable course has no branch-level prerequisite record, the importer can verify its rule against the individual ÖBS course detail. Rules with no evidence remain unlisted. Elective options without a full course code are recorded separately on their requirement. To see the current snapshot for each imported period, run the following command.
 
 ```bash
 docker compose exec db psql -U course_planner -d course_planner -c 'SELECT program, term_year, season, snapshot_id, observed_at FROM itu_active_snapshots ORDER BY observed_at DESC'
