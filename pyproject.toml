@@ -11,6 +11,7 @@ requires-python = ">=3.12,<3.13"
 license = { file = "LICENSE" }
 authors = [{ name = "Melih" }]
 dependencies = [
+    "beautifulsoup4>=4.13,<5",
     "matplotlib>=3.10,<4",
     "pandas>=2.2,<3",
     "pyscipopt>=5.2,<6",
