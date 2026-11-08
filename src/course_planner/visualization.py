@@ -27,7 +27,11 @@ def visualize_schedule(
     figure, axis = plt.subplots(figsize=(10, 6))
     start_hour, end_hour = hours or schedule_hours(selected_sections)
     times = range(start_hour, end_hour + 1)
-    axis.set_xticks(range(len(WEEKDAYS)), WEEKDAYS)
+    days = list(DAY_MAP) if any(
+        DAY_MAP[meeting.day] >= 5
+        for selected in selected_sections for meeting in selected.section.meetings
+    ) else WEEKDAYS
+    axis.set_xticks(range(len(days)), days)
     axis.set_yticks(range(len(times)), [f"{hour}:00" for hour in times])
 
     for selected in selected_sections:
@@ -48,7 +52,7 @@ def visualize_schedule(
                 wrap=True,
             )
 
-    axis.set_xlim(-0.5, len(WEEKDAYS) - 0.5)
+    axis.set_xlim(-0.5, len(days) - 0.5)
     axis.set_ylim(end_hour - start_hour, 0)
     axis.set_ylabel("Time")
     axis.set_title(title)

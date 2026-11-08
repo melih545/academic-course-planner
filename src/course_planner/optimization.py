@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Callable, Sequence, Set
+from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import dataclass
 from time import monotonic
 from typing import Literal
@@ -14,8 +14,9 @@ from .curriculum import (
     Prerequisite,
     UnresolvedPrerequisite,
     can_satisfy,
+    matched_requirements,
 )
-from .schedule import PlanRequest, ScheduledSection, Section
+from .schedule import PlanRequest, ScheduledSection, Section, Term
 
 SOLVE_BUDGET_SECONDS = 8.0
 
@@ -30,6 +31,13 @@ class PlanResult:
     options: list[list[ScheduledSection]]
     issues: tuple[str, ...] = ()
     status: Literal["solved", "infeasible", "time_limit", "interrupted"] = "solved"
+    diagnostics: tuple[PlanIssue, ...] = ()
+
+
+@dataclass(frozen=True)
+class PlanIssue:
+    code: Literal["data_missing", "section_not_offered", "prerequisite_unmet", "constraints"]
+    message: str
 
 
 def generate_schedule_options(
@@ -40,6 +48,9 @@ def generate_schedule_options(
     curriculum: Curriculum,
     confirmed_courses: Set[str] = frozenset(),
     time_limit_seconds: float = SOLVE_BUDGET_SECONDS,
+    offerings: Mapping[Term, Sequence[Section]] | None = None,
+    published_terms: Set[Term] = frozenset(),
+    incomplete_courses: Set[str] = frozenset(),
 ) -> PlanResult:
     if Model is None:
         raise RuntimeError(
@@ -53,8 +64,11 @@ def generate_schedule_options(
     terms = request.terms()
     completed_grades = request.completed_grades
     completed_codes = set(completed_grades) | confirmed_courses
-    required = curriculum.remaining_required(completed_codes)
-    deficits = curriculum.elective_deficits(completed_codes)
+    groups = curriculum.requirement_groups
+    required = set() if groups else curriculum.remaining_required(completed_codes)
+    deficits = {} if groups else curriculum.elective_deficits(completed_codes)
+    if groups and len(matched_requirements(groups, completed_codes)) == len(groups):
+        return PlanResult([[]])
 
     sections_by_season = defaultdict(list)
     for section in sections:
@@ -67,7 +81,10 @@ def generate_schedule_options(
     offered = set()
     candidates_by_term = {}
     for term in terms:
-        offered_sections = sections_by_season[term.season]
+        offered_sections = sections_by_season[term.season] if offerings is None else [
+            section for section in offerings.get(term, ())
+            if section.code in curriculum.courses and section.code not in completed_codes
+        ]
         offered.update(section.code for section in offered_sections)
         candidates = [
             ScheduledSection(section, term)
@@ -81,6 +98,34 @@ def generate_schedule_options(
         prior_codes.update(section.code for section in candidates)
 
     eligible = prior_codes - confirmed_courses
+    if groups:
+        matched = matched_requirements(groups, eligible | completed_codes)
+        diagnostics = []
+        for index, group in enumerate(groups):
+            if index in matched:
+                continue
+            codes = set(group.codes)
+            title = f"{group.title} ({', '.join(group.codes[:5])})"
+            if codes & (eligible | completed_codes):
+                diagnostics.append(PlanIssue("constraints", f"{title}: available courses overlap with other requirements."))
+            elif codes & offered:
+                unresolved = [
+                    code for code in sorted(codes & offered)
+                    if isinstance(curriculum.courses[code].prerequisite, UnresolvedPrerequisite)
+                ]
+                if unresolved:
+                    detail = _prerequisite_issue(curriculum, unresolved[0])
+                    diagnostics.append(PlanIssue("data_missing", f"{title}: {detail}"))
+                else:
+                    detail = _prerequisite_issue(curriculum, min(codes & offered))
+                    diagnostics.append(PlanIssue("prerequisite_unmet", f"{title}: {detail}"))
+            elif group.unresolved_options or codes & incomplete_courses or any(term not in published_terms for term in terms):
+                diagnostics.append(PlanIssue("data_missing", f"{title}: section or elective coverage is incomplete."))
+            else:
+                diagnostics.append(PlanIssue("section_not_offered", f"{title}: no eligible published section in this window."))
+        if diagnostics:
+            return PlanResult([], tuple(item.message for item in diagnostics), "infeasible", tuple(diagnostics))
+
     courses_with_sections = {
         section.code for season in sections_by_season.values() for section in season
     }
@@ -111,7 +156,7 @@ def generate_schedule_options(
             )
     if issues:
         return PlanResult([], tuple(issues), "infeasible")
-    if not required and not any(deficits.values()):
+    if not groups and not required and not any(deficits.values()):
         return PlanResult([[]])
 
     deadline = monotonic() + time_limit_seconds
@@ -130,6 +175,19 @@ def generate_schedule_options(
             model.addCons(quicksum(variables) == 1)
         else:
             model.addCons(quicksum(variables) <= 1)
+    if groups:
+        matches_by_code = defaultdict(list)
+        for group in groups:
+            matches = []
+            for code in group.codes:
+                if code in completed_codes or code in vars_by_code:
+                    match = model.addVar(vtype="B")
+                    matches.append(match)
+                    matches_by_code[code].append(match)
+            model.addCons(quicksum(matches) == 1)
+        for code, matches in matches_by_code.items():
+            available = 1 if code in completed_codes else quicksum(vars_by_code[code])
+            model.addCons(quicksum(matches) <= available)
     for category, deficit in deficits.items():
         if deficit:
             model.addCons(

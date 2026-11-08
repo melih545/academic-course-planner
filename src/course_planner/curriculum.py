@@ -12,7 +12,7 @@ ELECTIVE_MINIMUMS = {"Elective Analytic": 4, "Elective Functional": 4, "ITB": 1}
 _CONNECTOR = re.compile(r"(\(|\)|\b(?:veya|ve|or|and)\b)", re.IGNORECASE)
 _COURSE_CODE = r"[A-Z]+\s+\d+[A-Z]*"
 _GRADED_COURSE = re.compile(
-    rf"({_COURSE_CODE})\s+MIN\s+([A-Z]{{2}})|MIN\s+([A-Z]{{2}})\s+({_COURSE_CODE})"
+    rf"({_COURSE_CODE})\s+MIN\.?\s+([A-Z]{{2}})|MIN\.?\s+([A-Z]{{2}})\s+({_COURSE_CODE})"
 )
 
 
@@ -135,9 +135,36 @@ class RequirementProgress:
 
 
 @dataclass(frozen=True)
+class RequirementGroup:
+    title: str
+    codes: tuple[str, ...]
+    unresolved_options: bool = False
+
+
+def matched_requirements(groups: tuple[RequirementGroup, ...], codes: Set[str]) -> set[int]:
+    """Find a maximum matching so a completed course fills at most one requirement."""
+    assignments: dict[str, int] = {}
+
+    def assign(index: int, visited: set[str]) -> bool:
+        for code in groups[index].codes:
+            if code not in codes or code in visited:
+                continue
+            visited.add(code)
+            if code not in assignments or assign(assignments[code], visited):
+                assignments[code] = index
+                return True
+        return False
+
+    for index in range(len(groups)):
+        assign(index, set())
+    return set(assignments.values())
+
+
+@dataclass(frozen=True)
 class Curriculum:
     courses: Mapping[str, Course]
     elective_minimums: Mapping[str, int] = field(default_factory=ELECTIVE_MINIMUMS.copy)
+    requirement_groups: tuple[RequirementGroup, ...] = ()
 
     @classmethod
     def from_frame(

@@ -103,3 +103,27 @@ def test_changed_data_is_versioned_and_an_older_collection_cannot_supersede_it(d
     assert database.execute(
         "SELECT enrolled FROM itu_sections ORDER BY snapshot_id"
     ).fetchall() == [(25,), (27,)]
+
+
+def test_api_plans_against_a_pinned_imported_snapshot(database, snapshot, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from course_planner import planning_api
+    from course_planner.planning_data import load_planning_data
+
+    first = import_snapshot(database, snapshot)
+    updated = replace(
+        snapshot, sections=(), observed_at=snapshot.observed_at + timedelta(minutes=1)
+    )
+    second = import_snapshot(database, updated)
+    monkeypatch.setattr(planning_api, "read_dataset", lambda ids=(): load_planning_data(database, ids))
+    term = {"year": 2026, "season": "Fall"}
+    payload = {"start": term, "end": term, "completed_grades": {"BIL 100E": "DD"}}
+
+    with TestClient(planning_api.app) as client:
+        assert client.get("/v1/catalogue").json()["snapshots"][0]["id"] == second.snapshot_id
+        current = client.post("/v1/plans", json=payload).json()
+        assert current["issues"][0]["code"] == "section_not_offered"
+        pinned = client.post("/v1/plans", json={**payload, "snapshot_ids": [first.snapshot_id]}).json()
+        assert pinned["snapshot_ids"] == [first.snapshot_id]
+        assert pinned["options"][0][0]["section"]["crn"] == 12345

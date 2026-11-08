@@ -26,6 +26,8 @@ LEVEL = "programSeviyeTipiAnahtari=LS"
 TERM_URL = f"{SCHEDULE}/GetAktifDonemByProgramSeviye?{LEVEL}"
 BRANCH_URL = f"{SCHEDULE}/SearchBransKoduByProgramSeviye?{LEVEL}"
 RULES_INDEX = f"{BASE}/public/GenelTanimlamalar/DersOnsartList"
+ING100_SOURCE = "https://ninova.itu.edu.tr/tr/dersler/yabanci-diller-yuksekokulu/25503/ing-100/form"
+ING100_ELIGIBILITY = "English proficiency eligibility must be confirmed."
 CODE = re.compile(r"[A-Z]{2,8} [0-9]{3,4}[A-Z]{0,4}")
 TERM_LABEL = re.compile(r"(\d{4})\s*-\s*(\d{4})\s+(Güz|Bahar|Yaz) Dönemi")
 DAYS = ("Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar")
@@ -85,6 +87,7 @@ class Section:
     allowed_programs: tuple[str, ...] | None
     meetings: tuple[Meeting, ...]
     source_url: str
+    no_prerequisite_reported: bool = False
 
 
 @dataclass(frozen=True)
@@ -180,6 +183,15 @@ def collect_snapshot(fetch: Callable[[str], str] = fetch_public) -> Snapshot:
         raise SourceError(f"No eligible {PROGRAM} sections found in the published term")
     if parse_term(get(TERM_URL)) != (label, year, season):
         raise SourceError("The active term changed during collection. Retry the import.")
+    applicable = {}
+    for section in sections.values():
+        if PROGRAM in (section.allowed_programs or ()) and section.quota and section.meetings:
+            applicable.setdefault(section.course_code, []).append(section)
+    for code, candidates in applicable.items():
+        if code not in rules and all(section.no_prerequisite_reported for section in candidates):
+            rules[code] = Rule(code, "", "", candidates[0].source_url)
+    if "ING 100" in codes:
+        rules["ING 100"] = Rule("ING 100", "", ING100_ELIGIBILITY, ING100_SOURCE)
     return Snapshot(
         PROGRAM, PLAN_ID, title, label, year, season, observed_at,
         tuple(sorted(courses, key=lambda course: course.code)), tuple(requirements),
@@ -356,6 +368,8 @@ def parse_sections(body: str, codes: set[str], source: str) -> tuple[Section, ..
             crn, code, values["Öğretim Yöntemi"], values["Öğretim Üyesi"], values["Bina"],
             values["Derslik"], _count(values["Kontenjan"]), _count(values["Yazılan"]), allowed,
             _meetings(values["Gün"], values["Saat"], crn), source,
+            values.get("Ders Önşartları") == "-"
+            and values.get("Başarılan Kredi/Sınıf Önşartı") == "-",
         )
         if crn in sections:
             other = sections[crn]

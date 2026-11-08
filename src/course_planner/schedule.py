@@ -49,6 +49,9 @@ class Section:
     season: str
     meetings: tuple[Meeting, ...]
     instructor: str = ""
+    published_term: Term | None = None
+    crn: int | None = None
+    source_url: str | None = None
 
 
 @dataclass(frozen=True)

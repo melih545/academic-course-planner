@@ -50,7 +50,7 @@ Use terms such as `2025 - 2026 Güz Dönemi`. When several rows belong to the sa
 
 ## Import published İTÜ data
 
-The ingestion command collects the [ENDE_LS plan](https://obs.itu.edu.tr/public/DersPlan/DersPlanDetay/1551), its elective groups, listed prerequisites and the [active undergraduate timetable](https://obs.itu.edu.tr/public/DersProgram). This is a separate data pipeline. The Streamlit planner currently reads its bundled or uploaded CSVs.
+The ingestion command collects the [ENDE_LS plan](https://obs.itu.edu.tr/public/DersPlan/DersPlanDetay/1551), its elective groups, listed prerequisites and the [active undergraduate timetable](https://obs.itu.edu.tr/public/DersProgram). The planning API reads imported snapshots. The CSV planner remains available as a separate mode.
 
 ```bash
 docker compose up -d --wait db
@@ -68,7 +68,19 @@ The import preserves full periods, CRNs, weekly meetings, section eligibility, c
 docker compose exec db psql -U course_planner -d course_planner -c 'SELECT program, term_year, season, snapshot_id, observed_at FROM itu_active_snapshots ORDER BY observed_at DESC'
 ```
 
-`db-test` runs the parser and PostgreSQL tests against deterministic fixtures in a separate database schema. The tests cover duplicate imports, rollback on invalid data and protection against an older collection replacing the active version.
+`db-test` runs the full test suite, including PostgreSQL tests against deterministic fixtures in a separate database schema. The tests cover duplicate imports, rollback on invalid data and protection against an older collection replacing the active version.
+
+## Run the published-data planner
+
+```bash
+docker compose up -d --build api ui
+docker compose run --rm ingest
+docker compose run --rm db-test
+```
+
+Open Streamlit at http://localhost:8501 and select **Published İTÜ data**. If the tab was already open during an import, use **Refresh published data**. Open http://localhost:8000/docs for the FastAPI contract. `GET /v1/catalogue` lists the available snapshots, and `POST /v1/plans` accepts a term window and completed grades. Pass the returned `snapshot_ids` to replay a calculation against the same data.
+
+A published term only uses the exact sections from its snapshot. A later term can use an older same-season snapshot as a labelled forecast. Missing coverage, absent sections and unmet prerequisites are reported separately. Unlisted or unsupported eligibility rules are reported as missing evidence. In the published UI, only confirm ING 100 eligibility if you have verified it with İTÜ.
 
 ## Code layout
 

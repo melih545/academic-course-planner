@@ -10,9 +10,21 @@ COPY src ./src
 RUN uv sync --locked --no-dev --no-editable
 
 FROM runtime AS test
-RUN uv sync --locked --no-editable
+RUN uv sync --locked
+COPY app.py ./
+COPY data ./data
 COPY tests ./tests
-CMD ["python", "-m", "pytest", "-q", "tests/test_itu_ingestion.py", "tests/test_ingestion_postgres.py"]
+ENV MPLBACKEND=Agg
+CMD ["python", "-m", "pytest", "-q"]
 
 FROM runtime AS ingest
 ENTRYPOINT ["python", "-m", "course_planner.ingestion"]
+
+FROM runtime AS api
+CMD ["uvicorn", "course_planner.planning_api:app", "--host", "0.0.0.0", "--port", "8000"]
+
+FROM runtime AS ui
+RUN uv sync --locked --no-dev
+COPY app.py ./
+COPY data ./data
+CMD ["streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.headless=true", "--browser.gatherUsageStats=false"]

@@ -4,6 +4,9 @@
 !uv.lock
 !README.md
 !LICENSE
+!app.py
+!data
+!data/**
 !src
 !src/**
 !tests

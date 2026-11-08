@@ -16,8 +16,10 @@ DAY_MAP = {
     "Çarşamba": 2,
     "Perşembe": 3,
     "Cuma": 4,
+    "Cumartesi": 5,
+    "Pazar": 6,
 }
-WEEKDAYS = list(DAY_MAP.keys())
+WEEKDAYS = list(DAY_MAP)[:5]
 
 DISPLAY_START_HOUR = 8
 DISPLAY_END_HOUR = 22

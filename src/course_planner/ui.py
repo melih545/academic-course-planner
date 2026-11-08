@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
+from dataclasses import asdict
 from hashlib import sha256
 
+import httpx
 import pandas as pd
 import streamlit as st
 
@@ -17,6 +20,7 @@ from .constants import (
 from .curriculum import ELECTIVE_MINIMUMS, GRADE_ORDER, Curriculum, minimum_grades
 from .datasets import MAX_CSV_MB, Dataset, parse_uploaded_dataset
 from .optimization import PlanResult, generate_schedule_options
+from .planning_api import Catalogue, PlanResponse
 from .schedule import (
     ConfirmedTerm,
     PlanningSession,
@@ -98,6 +102,13 @@ def main() -> None:
     st.caption(
         "Generate semester-by-semester schedule options from bundled course history and curriculum data."
     )
+
+    api_url = os.environ.get("COURSE_PLANNER_API_URL")
+    if api_url and st.radio(
+        "Planner mode", ["Published İTÜ data", "CSV planner"], horizontal=True
+    ) == "Published İTÜ data":
+        render_published_planner(api_url.rstrip("/"))
+        return
 
     selection = select_dataset()
     if selection is None:
@@ -211,7 +222,107 @@ def main() -> None:
         return
 
     st.caption("Prerequisites scheduled in earlier terms are conditional on earning their minimum grades.")
-    render_schedule_options(course_labels, curriculum, session, result.options)
+    render_schedule_options(
+        course_labels,
+        {code for code, course in curriculum.courses.items() if course.category in ELECTIVE_MINIMUMS},
+        session, result.options,
+    )
+
+
+def render_published_planner(api_url: str) -> None:
+    if st.button("Refresh published data") or st.session_state.get("published_catalogue") is None:
+        try:
+            response = httpx.get(f"{api_url}/v1/catalogue", timeout=8)
+            response.raise_for_status()
+            st.session_state.published_catalogue = Catalogue.model_validate(response.json())
+        except (httpx.HTTPError, ValueError) as error:
+            st.error(_api_error(error))
+            return
+    catalogue: Catalogue = st.session_state.published_catalogue
+    ids = tuple(snapshot.id for snapshot in catalogue.snapshots)
+    token = ("published", ids)
+    if st.session_state.get("active_dataset") != token:
+        st.session_state.pop("planner", None)
+        st.session_state.result = None
+        st.session_state.active_dataset = token
+    latest = catalogue.snapshots[-1]
+    st.caption(f"Latest published term: {latest.term} · snapshot {latest.id} · observed {latest.observed_at:%Y-%m-%d %H:%M %Z}")
+    english_eligible = st.checkbox("I have verified my ING 100 English proficiency eligibility")
+    if st.session_state.get("published_english_eligible") != english_eligible:
+        st.session_state.published_english_eligible = english_eligible
+        st.session_state.pop("planner", None)
+        st.session_state.result = None
+    session: PlanningSession | None = st.session_state.get("planner")
+    request = render_configuration_form(
+        catalogue.course_labels, catalogue.higher_grades, session, initial_term=latest.term
+    )
+    if request is not None:
+        st.session_state.planner = PlanningSession(request)
+        st.session_state.result = None
+        st.rerun()
+    if session is None:
+        st.info("Enter your completed courses and planning window to calculate with published data.")
+        return
+    if session.confirmed:
+        st.subheader("Confirmed Schedules")
+        for confirmed in session.confirmed:
+            if confirmed.sections:
+                visualize_schedule(confirmed.sections, catalogue.course_labels, title=str(confirmed.term))
+        render_calendar_download(session.confirmed, catalogue.course_labels)
+
+    if session.current_term.position > session.request.end.position:
+        if st.session_state.get("published_requirements_met"):
+            st.success("All curriculum requirements have been completed or scheduled.")
+        else:
+            st.warning("The planning window has ended. Review the confirmed schedule above.")
+        return
+    if st.session_state.result is None:
+        payload = {
+            **asdict(session.remaining_request()),
+            "confirmed_courses": sorted(session.confirmed_codes),
+            "snapshot_ids": ids,
+            "english_eligible": english_eligible,
+        }
+        with st.spinner("Calculating against the selected data version..."):
+            try:
+                response = httpx.post(f"{api_url}/v1/plans", json=payload, timeout=25)
+                response.raise_for_status()
+                st.session_state.result = PlanResponse.model_validate(response.json())
+            except (httpx.HTTPError, ValueError) as error:
+                st.error(_api_error(error))
+                return
+    result: PlanResponse = st.session_state.result
+    st.metric("Curriculum requirements satisfied or confirmed", f"{result.confirmed_count}/{result.required_count}")
+    st.table([
+        {"Term": str(item.term), "Data": item.evidence, "Source term": str(item.source_term or ""),
+         "Snapshot": item.snapshot_id}
+        for item in result.coverage
+    ])
+    if result.confirmed_count == result.required_count:
+        st.success("All curriculum requirements have been completed or scheduled.")
+        return
+    if result.issues:
+        issues = "\n".join(f"- **{item.code}** · {item.message}" for item in result.issues)
+        st.warning(f"No complete plan fits this window.\n\n{issues}")
+    elif result.status in {"time_limit", "interrupted"}:
+        st.warning(f"Search status: {result.status}. Showing any feasible options found so far.")
+    if result.options:
+        render_schedule_options(
+            catalogue.course_labels, catalogue.elective_codes, session, result.options
+        )
+
+
+def _api_error(error: Exception) -> str:
+    if isinstance(error, httpx.HTTPStatusError):
+        try:
+            detail = error.response.json().get("detail", {})
+            if isinstance(detail, dict) and detail.get("message"):
+                return detail["message"]
+            if isinstance(detail, list) and detail:
+                return detail[0].get("msg", "The planning request is invalid.")
+        except ValueError:
+            pass
+    return "The planning API is unavailable or returned an unexpected response."
 
 
 def render_calendar_download(
@@ -259,8 +370,9 @@ def render_configuration_form(
     course_labels: dict[str, str],
     higher_grade_options: dict[str, list[str]],
     session: PlanningSession | None,
+    initial_term: Term | None = None,
 ) -> PlanRequest | None:
-    start = session.request.start if session else current_planning_term()
+    start = session.request.start if session else (initial_term or current_planning_term())
     end = session.request.end if session else start
     completed = session.request.completed_grades if session else {}
     available_years = list(range(min(2024, start.year), max(2034, start.year, end.year) + 2))
@@ -379,7 +491,7 @@ def calculate_current_grade_level(
 
 def render_schedule_options(
     course_labels: dict[str, str],
-    curriculum: Curriculum,
+    elective_codes: set[str],
     session: PlanningSession,
     options: list[list[ScheduledSection]],
 ) -> None:
@@ -401,7 +513,7 @@ def render_schedule_options(
                     format_func=lambda index: f"Option {index + 1}",
                     key=f"compare_{current_term}_{side}",
                 )
-            show_option(options[choice], current_term, curriculum, course_labels, hours)
+            show_option(options[choice], current_term, elective_codes, course_labels, hours)
 
     selected_option = st.radio(
         "Select your preferred schedule",
@@ -413,7 +525,12 @@ def render_schedule_options(
         f"Confirm {current_term}",
         key=f"confirm_{current_term}",
     ):
-        st.session_state.planner = session.confirm(term_options[selected_option])
+        confirmed = session.confirm(term_options[selected_option])
+        st.session_state.planner = confirmed
+        if isinstance(st.session_state.result, PlanResponse):
+            st.session_state.published_requirements_met = all(
+                section.term == current_term for section in options[selected_option]
+            )
         st.session_state.result = None
         st.rerun()
 
@@ -421,7 +538,7 @@ def render_schedule_options(
 def show_option(
     option: list[ScheduledSection],
     current_term: Term,
-    curriculum: Curriculum,
+    elective_codes: set[str],
     course_labels: dict[str, str],
     hours: tuple[int, int],
 ) -> None:
@@ -440,10 +557,11 @@ def show_option(
             {
                 "Term": str(term),
                 "Courses": ", ".join(sorted(section.code for section in sections)),
-                "Electives": sum(
-                    curriculum.courses[section.code].category in ELECTIVE_MINIMUMS
-                    for section in sections
-                ),
+                "Electives": sum(section.code in elective_codes for section in sections),
+                "Data": ", ".join(sorted({
+                    "forecast" if section.section.published_term != section.term else "published"
+                    for section in sections if section.section.published_term is not None
+                })) or "historical projection",
             }
             for term, sections in by_term.items()
         ])
