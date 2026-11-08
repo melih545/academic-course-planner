@@ -16,6 +16,7 @@ dependencies = [
     "httpx>=0.28,<1",
     "matplotlib>=3.10,<4",
     "pandas>=2.2,<3",
+    "pika>=1.3,<2",
     "prometheus-client>=0.22,<1",
     "psycopg[binary]>=3.2,<4",
     "pyscipopt>=5.2,<6",
@@ -34,6 +35,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "course_planner.ingestion" = ["schema.sql"]
+"course_planner.jobs" = ["schema.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

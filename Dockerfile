@@ -23,6 +23,9 @@ ENTRYPOINT ["python", "-m", "course_planner.ingestion"]
 FROM runtime AS api
 CMD ["uvicorn", "course_planner.planning_api:app", "--host", "0.0.0.0", "--port", "8000"]
 
+FROM runtime AS worker
+CMD ["python", "-m", "course_planner.jobs.worker"]
+
 FROM runtime AS ui
 RUN uv sync --locked --no-dev
 COPY app.py ./

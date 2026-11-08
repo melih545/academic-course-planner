@@ -39,9 +39,39 @@ services:
     environment:
       <<: *database-env
       COURSE_PLANNER_TEST_DSN: postgresql://course_planner:course_planner@db/course_planner
+      COURSE_PLANNER_TEST_AMQP_URL: amqp://course_planner:course_planner@rabbitmq:5672/%2F
     depends_on:
       db:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  rabbitmq:
+    image: rabbitmq:4.2
+    environment:
+      RABBITMQ_DEFAULT_USER: course_planner
+      RABBITMQ_DEFAULT_PASS: course_planner
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+  worker:
+    build:
+      context: .
+      target: worker
+    environment:
+      <<: *database-env
+      COURSE_PLANNER_AMQP_URL: amqp://course_planner:course_planner@rabbitmq:5672/%2F
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
 
   api:
     build:
@@ -96,5 +126,6 @@ services:
 
 volumes:
   db_data:
+  rabbitmq_data:
   prometheus_data:
   grafana_data:

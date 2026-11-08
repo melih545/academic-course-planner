@@ -93,6 +93,19 @@ Prometheus scrapes the planning API at `/metrics`. Open Grafana at http://localh
 
 The dashboard shows solver outcomes and latency, data age, the last successful import and import outcomes. Import outcomes are recorded in PostgreSQL so they remain available after the importer exits. Application events are emitted as JSON without completed-course inputs.
 
+## Run background jobs
+
+```bash
+docker compose up -d --build api worker
+curl -fsS -X POST http://localhost:8000/v1/jobs/imports -H 'Idempotency-Key: manual-import-1'
+```
+
+Use `POST /v1/jobs/plans` for asynchronous planning with the same body as `POST /v1/plans`. Both job endpoints require an `Idempotency-Key` and return a `Location` header. Read that URL or `GET /v1/jobs/{id}` for status, attempts and the result. Reuse the key when retrying the same request and choose a new key for a new job.
+
+The API persists jobs before a worker publishes them to RabbitMQ. Workers confirm publication, claim each job with a PostgreSQL lease and acknowledge messages after saving the outcome. Duplicate deliveries reuse the saved outcome. Transient errors get up to three attempts. The synchronous planning endpoint and one-shot import command are also available.
+
+When the monitoring profile is running, Prometheus also scrapes the worker for asynchronous solve outcomes and latency.
+
 ## Code layout
 
 The Streamlit entry point is [app.py](app.py). The [planning package](src/course_planner) contains the CSV pipeline, curriculum rules, scheduling domain, solver, and calendar export. [Tests](tests) cover the planner and the application flow with bundled data.

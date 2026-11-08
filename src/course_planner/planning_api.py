@@ -3,16 +3,27 @@
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from datetime import datetime
 from time import monotonic
 from typing import Annotated, Literal
+from uuid import UUID
 
 import psycopg
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, Header, HTTPException, Response
 from prometheus_client import CONTENT_TYPE_LATEST
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from .curriculum import GRADE_ORDER, matched_requirements, minimum_grades
+from .jobs.store import (
+    IdempotencyConflict,
+    Job,
+    enqueue,
+    existing_job,
+    get_job,
+    initialize_job_schema,
+    request_digest,
+)
 from .metrics_view import scrape_metrics
 from .optimization import PlanIssue, generate_schedule_options
 from .planning_data import (
@@ -194,3 +205,57 @@ def catalogue() -> Catalogue:
 @app.post("/v1/plans", response_model=PlanResponse)
 def create_plan(payload: PlanInput) -> PlanResponse:
     return solve_plan(read_dataset(payload.snapshot_ids), payload)
+
+
+JobKey = Annotated[
+    str, Header(alias="Idempotency-Key", min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9._:-]+$")
+]
+
+
+@contextmanager
+def job_connection(*, initialize: bool = False):
+    try:
+        with connect() as connection:
+            if initialize:
+                initialize_job_schema(connection)
+            yield connection
+    except IdempotencyConflict as error:
+        raise HTTPException(409, detail={"code": "idempotency_conflict", "message": str(error)}) from error
+    except psycopg.Error as error:
+        event("job_database_unavailable", error_type=type(error).__name__)
+        raise HTTPException(503, detail={
+            "code": "job_store_unavailable", "message": "The job store is unavailable."
+        }) from error
+
+
+@app.post("/v1/jobs/plans", status_code=202, response_model=Job)
+def queue_plan(payload: PlanInput, response: Response, key: JobKey) -> Job:
+    original = payload.model_dump(mode="json")
+    original["confirmed_courses"] = sorted(original["confirmed_courses"])
+    original["snapshot_ids"] = sorted(original["snapshot_ids"])
+    digest = request_digest(original)
+    with job_connection(initialize=True) as connection:
+        job = existing_job(connection, "plan", key, digest)
+        if job is None:
+            data = read_dataset(payload.snapshot_ids)
+            pinned = {**original, "snapshot_ids": [snapshot.id for snapshot in data.snapshots]}
+            job = enqueue(connection, "plan", key, digest, pinned)
+    response.headers["Location"] = f"/v1/jobs/{job.id}"
+    return job
+
+
+@app.post("/v1/jobs/imports", status_code=202, response_model=Job)
+def queue_import(response: Response, key: JobKey) -> Job:
+    with job_connection(initialize=True) as connection:
+        job = enqueue(connection, "import", key, request_digest({}), {})
+    response.headers["Location"] = f"/v1/jobs/{job.id}"
+    return job
+
+
+@app.get("/v1/jobs/{job_id}", response_model=Job)
+def job_status(job_id: UUID) -> Job:
+    with job_connection() as connection:
+        job = get_job(connection, job_id)
+    if job is None:
+        raise HTTPException(404, detail={"code": "job_not_found", "message": "Job not found."})
+    return job
