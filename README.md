@@ -70,6 +70,8 @@ docker compose exec db psql -U course_planner -d course_planner -c 'SELECT progr
 
 `db-test` runs the full test suite, including PostgreSQL tests against deterministic fixtures in a separate database schema. The tests cover duplicate imports, rollback on invalid data and protection against an older collection replacing the active version.
 
+After importing the active ÖBS timetable, use `docker compose run --rm --build ingest --archive` to import Spring 2024, Spring 2025, Fall 2025 and Spring 2026. The importer uses a pinned release of the independent [İTÜ course archive](https://github.com/yatuk/itu-archive) and records the CSV and metadata URLs. Fall 2024 has no verified export in this source. The import keeps archived section and meeting data for ENDE_LS courses in the official curriculum. The historical exports may omit room or registration details. Archive imports are repeatable, and a direct ÖBS snapshot takes precedence for the same term.
+
 ## Run the published-data planner
 
 ```bash
@@ -82,7 +84,7 @@ Open Streamlit at http://localhost:8501 and select **Published İTÜ data**. If 
 
 **Term schedule** is the default for published data. Choose a published term and leave completed courses empty if you have no passing grades. The planner schedules eligible courses that count toward the curriculum. Use **Graduation plan** to check whether all outstanding requirements fit a longer window. API clients can request a term schedule with `"planning_goal": "term"` and matching start and end terms. Requests without this field use graduation planning.
 
-A published term only uses the exact sections from its snapshot. A later term can use an older same-season snapshot as a labelled forecast. Missing coverage, absent sections and unmet prerequisites are reported separately. Unlisted or unsupported eligibility rules are reported as missing evidence. In the published UI, only confirm ING 100 eligibility if you have verified it with İTÜ.
+A published term uses the exact sections from its ÖBS snapshot. Graduation planning also uses exact archived terms where available. A future term can use an older same-season snapshot as a labelled forecast, with its original source shown in the coverage table. The planner applies the official curriculum and prerequisite rules from the newest selected direct ÖBS snapshot. Missing coverage, absent sections and unmet prerequisites are reported separately. Unlisted or unsupported eligibility rules are reported as missing evidence. In the published UI, only confirm ING 100 eligibility if you have verified it with İTÜ.
 
 ## Monitor the data pipeline
 

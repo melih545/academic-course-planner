@@ -31,7 +31,11 @@ class ImportMetrics:
         try:
             with connect() as connection:
                 observed = connection.execute(
-                    "SELECT max(observed_at) FROM itu_active_snapshots WHERE program = %s AND plan_id = %s",
+                    """
+                    SELECT max(a.observed_at) FROM itu_active_snapshots a
+                    JOIN itu_snapshots s ON s.id = a.snapshot_id
+                    WHERE a.program = %s AND a.plan_id = %s AND s.source_kind = 'published'
+                    """,
                     (PROGRAM, PLAN_ID),
                 ).fetchone()[0]
                 rows = connection.execute("""

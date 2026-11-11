@@ -28,6 +28,7 @@ from .metrics_view import scrape_metrics
 from .optimization import PlanIssue, generate_schedule_options
 from .planning_data import (
     DataUnavailable,
+    Evidence,
     PlanningData,
     PublishedSnapshot,
     connect,
@@ -40,7 +41,6 @@ from .telemetry import PLAN_RUNS, SOLVE_DURATION, event
 LOGGER = logging.getLogger(__name__)
 CourseCode = Annotated[str, StringConstraints(pattern=r"^[A-Z]+ [0-9]+[A-Z]*$", max_length=24)]
 Grade = Literal["DD", "DC", "CC", "CB", "BB", "BA", "AA"]
-Evidence = Literal["published", "forecast", "missing"]
 
 
 class TermInput(BaseModel):
@@ -96,6 +96,7 @@ class TermCoverage(BaseModel):
     snapshot_id: int | None = None
     source_term: Term | None = None
     observed_at: datetime | None = None
+    source_kind: Literal["published", "archive"] | None = None
 
 
 class PlanResponse(BaseModel):
@@ -147,7 +148,7 @@ def _solve_plan(data: PlanningData, payload: PlanInput) -> PlanResponse:
     published = set()
     incomplete_courses = set()
     for term in request.terms():
-        evidence, snapshot, sections = data.sections_for(term, allow_forecast=request.planning_goal == "graduation")
+        evidence, snapshot, sections = data.sections_for(term, published_only=request.planning_goal == "term")
         offerings[term] = sections
         if evidence == "published":
             published.add(term)
@@ -158,6 +159,7 @@ def _solve_plan(data: PlanningData, payload: PlanInput) -> PlanResponse:
             snapshot_id=snapshot.id if snapshot else None,
             source_term=snapshot.term if snapshot else None,
             observed_at=snapshot.observed_at if snapshot else None,
+            source_kind=snapshot.source_kind if snapshot else None,
         ))
     result = generate_schedule_options(
         (), request, curriculum=curriculum, confirmed_courses=payload.confirmed_courses,

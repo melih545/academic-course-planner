@@ -247,7 +247,8 @@ def render_published_planner(api_url: str) -> None:
         st.session_state.pop("planner", None)
         st.session_state.result = None
         st.session_state.active_dataset = token
-    latest = catalogue.snapshots[-1]
+    published = tuple(snapshot for snapshot in catalogue.snapshots if snapshot.source_kind == "published")
+    latest = published[-1]
     st.caption(f"Latest published term: {latest.term} · snapshot {latest.id} · observed {latest.observed_at:%Y-%m-%d %H:%M %Z}")
     english_eligible = st.checkbox("I have verified my ING 100 English proficiency eligibility")
     if st.session_state.get("published_english_eligible") != english_eligible:
@@ -257,7 +258,7 @@ def render_published_planner(api_url: str) -> None:
     session: PlanningSession | None = st.session_state.get("planner")
     request = render_configuration_form(
         catalogue.course_labels, catalogue.higher_grades, session, initial_term=latest.term,
-        published_terms=tuple(snapshot.term for snapshot in catalogue.snapshots) if term_schedule else (),
+        published_terms=tuple(snapshot.term for snapshot in published) if term_schedule else (),
     )
     if request is not None:
         st.session_state.planner = PlanningSession(request)
@@ -300,7 +301,7 @@ def render_published_planner(api_url: str) -> None:
     st.metric("Curriculum requirements satisfied or confirmed", f"{result.confirmed_count}/{result.required_count}")
     st.table([
         {"Term": str(item.term), "Data": item.evidence, "Source term": str(item.source_term or ""),
-         "Snapshot": item.snapshot_id}
+         "Source": item.source_kind or "", "Snapshot": item.snapshot_id}
         for item in result.coverage
     ])
     if result.confirmed_count == result.required_count:

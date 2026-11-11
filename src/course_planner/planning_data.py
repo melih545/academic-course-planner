@@ -6,6 +6,7 @@ import os
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 import psycopg
 
@@ -19,6 +20,8 @@ from .curriculum import (
 from .ingestion.itu import DAYS, ING100_ELIGIBILITY, PLAN_ID, PROGRAM
 from .schedule import Meeting, Section, Term
 
+Evidence = Literal["published", "archive", "forecast", "missing"]
+
 
 class DataUnavailable(ValueError):
     pass
@@ -30,6 +33,7 @@ class PublishedSnapshot:
     term: Term
     observed_at: datetime
     source_urls: tuple[str, ...]
+    source_kind: Literal["published", "archive"] = "published"
 
 
 @dataclass
@@ -41,12 +45,13 @@ class PlanningData:
     incomplete_courses: dict[Term, set[str]]
 
     def sections_for(
-        self, term: Term, *, allow_forecast: bool = True
-    ) -> tuple[str, PublishedSnapshot | None, tuple[Section, ...]]:
+        self, term: Term, *, published_only: bool = False
+    ) -> tuple[Evidence, PublishedSnapshot | None, tuple[Section, ...]]:
         if term in self.sections:
             snapshot = next(item for item in self.snapshots if item.term == term)
-            return "published", snapshot, self.sections[term]
-        if allow_forecast and term.position > self.snapshots[-1].term.position:
+            if snapshot.source_kind == "published" or not published_only:
+                return snapshot.source_kind, snapshot, self.sections[term]
+        if not published_only and term.position > self.snapshots[-1].term.position:
             for snapshot in reversed(self.snapshots):
                 if snapshot.term.season == term.season:
                     return "forecast", snapshot, self.sections[snapshot.term]
@@ -64,7 +69,7 @@ def load_planning_data(
         if snapshot_ids:
             rows = connection.execute(
                 """
-                SELECT id, term_year, season, observed_at, source_urls FROM itu_snapshots
+                SELECT id, term_year, season, observed_at, source_urls, source_kind FROM itu_snapshots
                 WHERE program = %s AND plan_id = %s AND id = ANY(%s)
                 """, (PROGRAM, PLAN_ID, list(snapshot_ids)),
             ).fetchall()
@@ -73,20 +78,22 @@ def load_planning_data(
         else:
             rows = connection.execute(
                 """
-                SELECT s.id, s.term_year, s.season, a.observed_at, s.source_urls
+                SELECT s.id, s.term_year, s.season, a.observed_at, s.source_urls, s.source_kind
                 FROM itu_active_snapshots a JOIN itu_snapshots s ON s.id = a.snapshot_id
                 WHERE a.program = %s AND a.plan_id = %s
                 """, (PROGRAM, PLAN_ID),
             ).fetchall()
         snapshots = tuple(sorted(
-            (PublishedSnapshot(row[0], Term(row[1], row[2]), row[3], tuple(row[4])) for row in rows),
+            (PublishedSnapshot(row[0], Term(row[1], row[2]), row[3], tuple(row[4]), row[5]) for row in rows),
             key=lambda item: item.term.position,
         ))
         if not snapshots:
             raise DataUnavailable("No ENDE_LS snapshot has been imported yet.")
         if len({item.term for item in snapshots}) != len(snapshots):
             raise DataUnavailable("Use only one snapshot per published term.")
-        latest = snapshots[-1].id
+        latest = next((item.id for item in reversed(snapshots) if item.source_kind == "published"), None)
+        if latest is None:
+            raise DataUnavailable("Select a published ÖBS snapshot to supply the curriculum and prerequisites.")
         requirements = connection.execute(
             """
             SELECT r.title, r.elective_group, r.unresolved_options, r.semester,

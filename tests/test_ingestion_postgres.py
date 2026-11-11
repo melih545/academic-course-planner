@@ -92,6 +92,38 @@ def test_api_plans_against_a_pinned_imported_snapshot(database, snapshot, monkey
         assert pinned["options"][0][0]["section"]["crn"] == 12345
 
 
+def test_graduation_uses_archive_for_exact_and_future_terms(database, snapshot):
+    from course_planner import planning_api
+    from course_planner.planning_data import load_planning_data
+
+    published = import_snapshot(database, snapshot)
+    archived = import_snapshot(database, replace(
+        snapshot, term_year=2026, season="Spring", term_label="2025-2026 Bahar Dönemi",
+        requirements=(), rules=(), source_kind="archive",
+    ))
+    data = load_planning_data(database, (archived.snapshot_id, published.snapshot_id))
+    past = {"year": 2026, "season": "Spring"}
+    future = {"year": 2027, "season": "Spring"}
+
+    for term, evidence in ((past, "archive"), (future, "forecast")):
+        payload = planning_api.PlanInput.model_validate({
+            "start": term, "end": term, "completed_grades": {"BIL 100E": "DD"},
+        })
+        result = planning_api.solve_plan(data, payload)
+        assert result.status == "solved"
+        assert result.coverage[0].evidence == evidence
+        assert result.coverage[0].source_kind == "archive"
+        assert result.coverage[0].snapshot_id == archived.snapshot_id
+        assert result.options[0][0].section.crn == 12345
+
+    term_schedule = planning_api.PlanInput.model_validate({
+        "start": past, "end": past, "planning_goal": "term",
+    })
+    result = planning_api.solve_plan(data, term_schedule)
+    assert result.coverage[0].evidence == "missing"
+    assert not result.options
+
+
 def test_prometheus_reports_import_outcomes_and_data_age(database, snapshot, monkeypatch):
     from contextlib import contextmanager
 
