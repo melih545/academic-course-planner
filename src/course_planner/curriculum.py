@@ -139,6 +139,7 @@ class RequirementGroup:
     title: str
     codes: tuple[str, ...]
     unresolved_options: bool = False
+    semester: int = 8
 
 
 def matched_requirements(groups: tuple[RequirementGroup, ...], codes: Set[str]) -> set[int]:

@@ -240,7 +240,9 @@ def render_published_planner(api_url: str) -> None:
             return
     catalogue: Catalogue = st.session_state.published_catalogue
     ids = tuple(snapshot.id for snapshot in catalogue.snapshots)
-    token = ("published", ids)
+    goal = st.radio("Planning goal", ["Term schedule", "Graduation plan"], horizontal=True)
+    term_schedule = goal == "Term schedule"
+    token = ("published", ids, goal)
     if st.session_state.get("active_dataset") != token:
         st.session_state.pop("planner", None)
         st.session_state.result = None
@@ -254,14 +256,15 @@ def render_published_planner(api_url: str) -> None:
         st.session_state.result = None
     session: PlanningSession | None = st.session_state.get("planner")
     request = render_configuration_form(
-        catalogue.course_labels, catalogue.higher_grades, session, initial_term=latest.term
+        catalogue.course_labels, catalogue.higher_grades, session, initial_term=latest.term,
+        published_terms=tuple(snapshot.term for snapshot in catalogue.snapshots) if term_schedule else (),
     )
     if request is not None:
         st.session_state.planner = PlanningSession(request)
         st.session_state.result = None
         st.rerun()
     if session is None:
-        st.info("Enter your completed courses and planning window to calculate with published data.")
+        st.info("Leave completed courses blank if you have not passed any courses yet.")
         return
     if session.confirmed:
         st.subheader("Confirmed Schedules")
@@ -271,7 +274,9 @@ def render_published_planner(api_url: str) -> None:
         render_calendar_download(session.confirmed, catalogue.course_labels)
 
     if session.current_term.position > session.request.end.position:
-        if st.session_state.get("published_requirements_met"):
+        if term_schedule:
+            st.success(f"Your timetable for {session.request.start} is confirmed.")
+        elif st.session_state.get("published_requirements_met"):
             st.success("All curriculum requirements have been completed or scheduled.")
         else:
             st.warning("The planning window has ended. Review the confirmed schedule above.")
@@ -303,9 +308,17 @@ def render_published_planner(api_url: str) -> None:
         return
     if result.issues:
         issues = "\n".join(f"- **{item.code}** · {item.message}" for item in result.issues)
-        st.warning(f"No complete plan fits this window.\n\n{issues}")
+        if term_schedule:
+            st.warning("No eligible courses could be scheduled for this term with the selected limits.")
+            with st.expander("See course and data details"):
+                st.markdown(issues)
+        else:
+            st.warning(f"No complete plan fits this window.\n\n{issues}")
     elif result.status in {"time_limit", "interrupted"}:
-        st.warning(f"Search status: {result.status}. Showing any feasible options found so far.")
+        if result.options:
+            st.warning("The search ended early. The schedules below meet the selected constraints.")
+        else:
+            st.warning("The search ended before it found a feasible schedule.")
     if result.options:
         render_schedule_options(
             catalogue.course_labels, catalogue.elective_codes, session, result.options
@@ -371,6 +384,7 @@ def render_configuration_form(
     higher_grade_options: dict[str, list[str]],
     session: PlanningSession | None,
     initial_term: Term | None = None,
+    published_terms: tuple[Term, ...] = (),
 ) -> PlanRequest | None:
     start = session.request.start if session else (initial_term or current_planning_term())
     end = session.request.end if session else start
@@ -396,35 +410,31 @@ def render_configuration_form(
             )
             grade_overrides.update(dict.fromkeys(selected, grade))
 
-        col1, col2 = st.columns(2)
-        with col1:
-            current_year = st.selectbox(
-                "Select the current year",
-                options=available_years,
-                index=available_years.index(start.year),
+        if published_terms:
+            start = end = st.selectbox(
+                "Published term", published_terms, index=published_terms.index(start), format_func=str
             )
-        with col2:
-            current_semester = st.selectbox(
-                "Select the current semester",
-                options=SEMESTER_LST,
-                index=SEMESTER_LST.index(start.season),
+        else:
+            col1, col2 = st.columns(2)
+            current_year = col1.selectbox(
+                "Select the current year", available_years, index=available_years.index(start.year)
             )
-
-        col1, col2 = st.columns(2)
-        with col1:
-            last_year = st.selectbox(
-                "Select the year you want to finish",
-                options=available_years,
-                index=available_years.index(end.year),
-            )
-        with col2:
-            last_semester = st.selectbox(
-                "Select the final semester",
-                options=SEMESTER_LST,
-                index=SEMESTER_LST.index(end.season),
+            current_semester = col2.selectbox(
+                "Select the current semester", SEMESTER_LST, index=SEMESTER_LST.index(start.season)
             )
 
-        credit_col, day_col, summer_col = st.columns(3)
+            col1, col2 = st.columns(2)
+            last_year = col1.selectbox(
+                "Select the year you want to finish", available_years, index=available_years.index(end.year)
+            )
+            last_semester = col2.selectbox(
+                "Select the final semester", SEMESTER_LST, index=SEMESTER_LST.index(end.season)
+            )
+            start = Term(current_year, current_semester)
+            end = Term(last_year, last_semester)
+
+        columns = st.columns(2 if published_terms else 3)
+        credit_col, day_col = columns[:2]
         max_credits = credit_col.number_input(
             "Maximum credits per term",
             min_value=1,
@@ -439,9 +449,11 @@ def render_configuration_form(
             format_func=lambda day: day or "No preference",
             help="A preference used to rank otherwise equivalent plans.",
         )
-        allow_summer = summer_col.checkbox(
-            "Allow summer terms", value=session.request.allow_summer if session else True
-        )
+        allow_summer = True
+        if not published_terms:
+            allow_summer = columns[2].checkbox(
+                "Allow summer terms", value=session.request.allow_summer if session else True
+            )
 
         submitted = st.form_submit_button("Calculate")
 
@@ -458,12 +470,13 @@ def render_configuration_form(
     }
     try:
         return PlanRequest(
-            Term(current_year, current_semester),
-            Term(last_year, last_semester),
+            start,
+            end,
             completed,
             max_credits=max_credits,
             preferred_free_day=preferred_free_day,
             allow_summer=allow_summer,
+            planning_goal="term" if published_terms else "graduation",
         )
     except ValueError as error:
         st.error(str(error))
@@ -498,7 +511,8 @@ def render_schedule_options(
     current_term = session.current_term
     term_options = [[section for section in plan if section.term == current_term] for plan in options]
     st.subheader("Compare Schedule Options")
-    st.caption("Compare full paths below. Confirming an option saves only the current term.")
+    if session.request.planning_goal == "graduation":
+        st.caption("Confirming an option saves the current term.")
     choice_ids = range(len(options))
     hours = schedule_hours([section for term in term_options for section in term])
     for side, column in enumerate(st.columns(min(2, len(options)))):
@@ -527,7 +541,7 @@ def render_schedule_options(
     ):
         confirmed = session.confirm(term_options[selected_option])
         st.session_state.planner = confirmed
-        if isinstance(st.session_state.result, PlanResponse):
+        if session.request.planning_goal == "graduation" and isinstance(st.session_state.result, PlanResponse):
             st.session_state.published_requirements_met = all(
                 section.term == current_term for section in options[selected_option]
             )

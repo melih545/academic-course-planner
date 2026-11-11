@@ -40,11 +40,13 @@ class PlanningData:
     sections: dict[Term, tuple[Section, ...]]
     incomplete_courses: dict[Term, set[str]]
 
-    def sections_for(self, term: Term) -> tuple[str, PublishedSnapshot | None, tuple[Section, ...]]:
+    def sections_for(
+        self, term: Term, *, allow_forecast: bool = True
+    ) -> tuple[str, PublishedSnapshot | None, tuple[Section, ...]]:
         if term in self.sections:
             snapshot = next(item for item in self.snapshots if item.term == term)
             return "published", snapshot, self.sections[term]
-        if term.position > self.snapshots[-1].term.position:
+        if allow_forecast and term.position > self.snapshots[-1].term.position:
             for snapshot in reversed(self.snapshots):
                 if snapshot.term.season == term.season:
                     return "forecast", snapshot, self.sections[snapshot.term]
@@ -87,7 +89,7 @@ def load_planning_data(
         latest = snapshots[-1].id
         requirements = connection.execute(
             """
-            SELECT r.title, r.elective_group, r.unresolved_options,
+            SELECT r.title, r.elective_group, r.unresolved_options, r.semester,
                    array_agg(rc.course_code ORDER BY rc.course_code)
             FROM itu_requirements r JOIN itu_requirement_courses rc
               USING (snapshot_id, semester, position)
@@ -119,8 +121,11 @@ def load_planning_data(
             """, (ids,),
         ).fetchall()
 
-    groups = tuple(RequirementGroup(title, tuple(codes), bool(unresolved)) for title, _, unresolved, codes in requirements)
-    required = {code for _, group, _, codes in requirements if group is None for code in codes}
+    groups = tuple(
+        RequirementGroup(title, tuple(codes), bool(unresolved), semester)
+        for title, _, unresolved, semester, codes in requirements
+    )
+    required = {code for _, group, _, _, codes in requirements if group is None for code in codes}
     courses = {}
     labels = {}
     for code, title, credits, rule_text, standing in course_rows:

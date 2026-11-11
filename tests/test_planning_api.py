@@ -94,13 +94,38 @@ def test_published_term_without_sections_never_uses_an_older_same_season():
     assert result.issues[0].code == "section_not_offered"
 
 
-def test_streamlit_published_mode_uses_api_and_confirms_the_returned_section(monkeypatch):
+def test_term_schedule_does_not_use_forecast_sections():
+    plan = planning_api.PlanInput.model_validate({
+        **_payload(NEXT_FALL), "planning_goal": "term",
+    })
+
+    result = planning_api.solve_plan(_data(), plan)
+
+    assert result.status == "infeasible"
+    assert result.coverage[0].evidence == "missing"
+    assert result.options == []
+
+
+def test_streamlit_published_mode_plans_a_term_with_no_completed_courses(monkeypatch):
     import httpx
     from streamlit.testing.v1 import AppTest
 
+    data = _data()
+    blocked = "END 311E"
+    data.labels[blocked] = "Statistics"
+    data.curriculum.courses[blocked] = Course("Main", MinimumGrade("MAT 104E", "DD"), "MAT 104E MIN. DD")
+    data.curriculum = Curriculum(
+        data.curriculum.courses, {},
+        (*data.curriculum.requirement_groups, RequirementGroup("Statistics", (blocked,))),
+    )
+    data.sections[FALL] += (Section(2, blocked, "Fall", (), "", FALL, 54321),)
+
     monkeypatch.setenv("COURSE_PLANNER_API_URL", "http://planner-api.test")
-    monkeypatch.setattr(planning_api, "read_dataset", lambda ids=(): _data())
+    monkeypatch.setattr(planning_api, "read_dataset", lambda ids=(): data)
     with TestClient(planning_api.app) as client:
+        graduation = client.post("/v1/plans", json=_payload(FALL)).json()
+        assert graduation["status"] == "infeasible"
+        assert [issue["code"] for issue in graduation["issues"]] == ["prerequisite_unmet"]
         monkeypatch.setattr(httpx, "get", lambda url, **_: client.get(url))
         monkeypatch.setattr(httpx, "post", lambda url, **kwargs: client.post(url, json=kwargs["json"]))
         ui = AppTest.from_file(Path(__file__).resolve().parents[1] / "app.py", default_timeout=30).run()
@@ -108,9 +133,11 @@ def test_streamlit_published_mode_uses_api_and_confirms_the_returned_section(mon
         assert any("Latest published term: 2026 Fall" in item.value for item in ui.caption)
         next(button for button in ui.button if button.label == "Calculate").click().run()
         assert not ui.exception
+        assert not ui.warning
+        assert {item.code for item in ui.session_state.result.options[0]} == {CODES[0]}
         next(button for button in ui.button if button.label == "Confirm 2026 Fall").click().run()
         assert not ui.exception
-        assert any("curriculum requirements" in item.value for item in ui.success)
+        assert [item.value for item in ui.success] == ["Your timetable for 2026 Fall is confirmed."]
 
 
 def test_successful_plan_exposes_counter_and_duration_metrics(monkeypatch):

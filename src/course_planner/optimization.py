@@ -19,6 +19,7 @@ from .curriculum import (
 from .schedule import PlanRequest, ScheduledSection, Section, Term
 
 SOLVE_BUDGET_SECONDS = 8.0
+TERM_COURSE_LIMIT = 10
 
 try:
     from pyscipopt import Expr, Model, quicksum
@@ -65,6 +66,9 @@ def generate_schedule_options(
     completed_grades = request.completed_grades
     completed_codes = set(completed_grades) | confirmed_courses
     groups = curriculum.requirement_groups
+    term_schedule = request.planning_goal == "term"
+    if term_schedule and not groups:
+        raise ValueError("A term schedule requires published curriculum requirements.")
     required = set() if groups else curriculum.remaining_required(completed_codes)
     deficits = {} if groups else curriculum.elective_deficits(completed_codes)
     if groups and len(matched_requirements(groups, completed_codes)) == len(groups):
@@ -98,7 +102,7 @@ def generate_schedule_options(
         prior_codes.update(section.code for section in candidates)
 
     eligible = prior_codes - confirmed_courses
-    if groups:
+    if groups and (not term_schedule or not eligible):
         matched = matched_requirements(groups, eligible | completed_codes)
         diagnostics = []
         for index, group in enumerate(groups):
@@ -175,6 +179,7 @@ def generate_schedule_options(
             model.addCons(quicksum(variables) == 1)
         else:
             model.addCons(quicksum(variables) <= 1)
+    prioritized_matches = []
     if groups:
         matches_by_code = defaultdict(list)
         for group in groups:
@@ -184,10 +189,18 @@ def generate_schedule_options(
                     match = model.addVar(vtype="B")
                     matches.append(match)
                     matches_by_code[code].append(match)
-            model.addCons(quicksum(matches) == 1)
+                    if term_schedule and code not in completed_codes:
+                        prioritized_matches.append((group.semester, match))
+            if term_schedule:
+                model.addCons(quicksum(matches) <= 1)
+            else:
+                model.addCons(quicksum(matches) == 1)
         for code, matches in matches_by_code.items():
             available = 1 if code in completed_codes else quicksum(vars_by_code[code])
             model.addCons(quicksum(matches) <= available)
+        if term_schedule:
+            for code, variables in vars_by_code.items():
+                model.addCons(quicksum(variables) <= quicksum(matches_by_code[code]))
     for category, deficit in deficits.items():
         if deficit:
             model.addCons(
@@ -209,7 +222,7 @@ def generate_schedule_options(
         used = model.addVar(vtype="B", name=f"Use_{term.year}_{term.season}")
         used_terms[term] = used
         term_vars = {section.section.id: section_vars[section] for section in candidates}
-        model.addCons(quicksum(term_vars.values()) <= 10 * used)
+        model.addCons(quicksum(term_vars.values()) <= TERM_COURSE_LIMIT * used)
         if request.max_credits is not None:
             model.addCons(quicksum(
                 curriculum.courses[section.code].credits * section_vars[section]
@@ -239,10 +252,20 @@ def generate_schedule_options(
         if left.season == "Summer" and index > 0:
             left = terms[index - 1]
         model.addCons(used_terms[left] >= used_terms[right])
-    objective = (
-        (len(curriculum.courses) + 1) * quicksum(used_terms.values())
-        + quicksum(section_vars.values())
-    )
+    if term_schedule:
+        matches = quicksum(match for assignments in matches_by_code.values() for match in assignments)
+        earlier_requirements = quicksum((9 - semester) * match for semester, match in prioritized_matches)
+        # Prefer more covered requirements, then fewer courses, then earlier curriculum semesters.
+        objective = (
+            (8 * TERM_COURSE_LIMIT + 1)
+            * (quicksum(section_vars.values()) - (TERM_COURSE_LIMIT + 1) * matches)
+            - earlier_requirements
+        )
+    else:
+        objective = (
+            (len(curriculum.courses) + 1) * quicksum(used_terms.values())
+            + quicksum(section_vars.values())
+        )
     if request.preferred_free_day is not None:
         on_preferred_day = quicksum(
             variable for scheduled, variable in section_vars.items()
@@ -261,23 +284,27 @@ def generate_schedule_options(
         status = model.getStatus()
         if status == "infeasible":
             break
+        selected = []
         if model.getNSols():
             solution = model.getBestSol()
             selected = [
                 section for section, variable in section_vars.items()
                 if model.getSolVal(solution, variable) > 0.5
             ]
-            options.append(selected)
+            if selected or not term_schedule:
+                options.append(selected)
         if status == "timelimit":
             return PlanResult(options, status="time_limit")
         if status != "optimal":
             return PlanResult(options, status="interrupted")
-        if index + 1 == max_solutions:
+        if not selected or index + 1 == max_solutions:
             break
         model.freeTransform()
         model.addCons(quicksum(section_vars[section] for section in selected) <= len(selected) - 1)
 
     if not options:
+        if term_schedule:
+            return PlanResult([], ("No eligible courses fit this term and the selected limits.",), "infeasible")
         credit_rule = (
             f" and {request.max_credits}-credit limit" if request.max_credits is not None else ""
         )

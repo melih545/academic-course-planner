@@ -80,6 +80,8 @@ docker compose run --rm db-test
 
 Open Streamlit at http://localhost:8501 and select **Published İTÜ data**. If the tab was already open during an import, use **Refresh published data**. Open http://localhost:8000/docs for the FastAPI contract. `GET /v1/catalogue` lists the available snapshots, and `POST /v1/plans` accepts a term window and completed grades. Pass the returned `snapshot_ids` to replay a calculation against the same data.
 
+**Term schedule** is the default for published data. Choose a published term and leave completed courses empty if you have no passing grades. The planner schedules eligible courses that count toward the curriculum. Use **Graduation plan** to check whether all outstanding requirements fit a longer window. API clients can request a term schedule with `"planning_goal": "term"` and matching start and end terms. Requests without this field use graduation planning.
+
 A published term only uses the exact sections from its snapshot. A later term can use an older same-season snapshot as a labelled forecast. Missing coverage, absent sections and unmet prerequisites are reported separately. Unlisted or unsupported eligibility rules are reported as missing evidence. In the published UI, only confirm ING 100 eligibility if you have verified it with İTÜ.
 
 ## Monitor the data pipeline

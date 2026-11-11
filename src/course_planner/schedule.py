@@ -3,11 +3,13 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from .constants import DAY_MAP, SEMESTER_LST
 
 LOCAL_TIMEZONE = ZoneInfo("Europe/Istanbul")
+PlanningGoal = Literal["graduation", "term"]
 
 
 def current_planning_term(today: date | None = None) -> Term:
@@ -72,8 +74,11 @@ class PlanRequest:
     max_credits: int | None = None
     preferred_free_day: str | None = None
     allow_summer: bool = True
+    planning_goal: PlanningGoal = "graduation"
 
     def __post_init__(self) -> None:
+        if self.planning_goal == "term" and self.start != self.end:
+            raise ValueError("A term schedule must start and end in the same term.")
         if self.end.position < self.start.position:
             raise ValueError("The finish semester must not be earlier than the current semester.")
         if not self.allow_summer and self.start == self.end and self.start.season == "Summer":

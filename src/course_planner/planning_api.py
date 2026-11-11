@@ -65,6 +65,7 @@ class PlanInput(BaseModel):
     preferred_free_day: str | None = None
     allow_summer: bool = True
     english_eligible: bool = False
+    planning_goal: Literal["graduation", "term"] = "graduation"
 
     @model_validator(mode="after")
     def validate_window(self) -> PlanInput:
@@ -78,7 +79,7 @@ class PlanInput(BaseModel):
     def to_domain(self) -> PlanRequest:
         return PlanRequest(
             self.start.to_domain(), self.end.to_domain(), self.completed_grades,
-            self.max_credits, self.preferred_free_day, self.allow_summer,
+            self.max_credits, self.preferred_free_day, self.allow_summer, self.planning_goal,
         )
 
 
@@ -146,7 +147,7 @@ def _solve_plan(data: PlanningData, payload: PlanInput) -> PlanResponse:
     published = set()
     incomplete_courses = set()
     for term in request.terms():
-        evidence, snapshot, sections = data.sections_for(term)
+        evidence, snapshot, sections = data.sections_for(term, allow_forecast=request.planning_goal == "graduation")
         offerings[term] = sections
         if evidence == "published":
             published.add(term)
