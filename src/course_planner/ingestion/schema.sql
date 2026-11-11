@@ -25,6 +25,9 @@ CREATE TABLE IF NOT EXISTS itu_active_snapshots (
         REFERENCES itu_snapshots (id, program, plan_id, term_year, season)
 );
 
+ALTER TABLE itu_snapshots ADD COLUMN IF NOT EXISTS source_kind text NOT NULL
+    DEFAULT 'published' CHECK (source_kind IN ('published', 'archive'));
+
 CREATE TABLE IF NOT EXISTS itu_courses (
     snapshot_id bigint NOT NULL REFERENCES itu_snapshots (id),
     code text NOT NULL,

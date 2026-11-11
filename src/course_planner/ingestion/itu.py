@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from http.client import HTTPException
 from time import sleep
+from typing import Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urljoin, urlsplit
 from urllib.request import Request, urlopen
@@ -108,6 +109,7 @@ class Snapshot:
     rules: tuple[Rule, ...]
     sections: tuple[Section, ...]
     source_urls: tuple[str, ...]
+    source_kind: Literal["published", "archive"] = "published"
 
 
 def fetch_public(url: str) -> str:

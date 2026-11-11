@@ -29,23 +29,26 @@ def initialize_schema(connection: Connection) -> None:
 def import_snapshot(connection: Connection, snapshot: Snapshot) -> ImportResult:
     payload = asdict(snapshot)
     del payload["observed_at"]
+    if snapshot.source_kind == "published":
+        del payload["source_kind"]
     digest = hashlib.sha256(
         json.dumps(payload, default=str, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()
     key = (snapshot.program, snapshot.plan_id, snapshot.term_year, snapshot.season)
     with connection.transaction(), connection.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (str(key),))
         inserted = cursor.execute(
             """
             INSERT INTO itu_snapshots (
                 program, plan_id, term_year, season, plan_title, term_label,
-                content_sha256, observed_at, source_urls
+                content_sha256, observed_at, source_urls, source_kind
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (content_sha256) DO NOTHING
             RETURNING id
             """,
             (*key, snapshot.plan_title, snapshot.term_label, digest, snapshot.observed_at,
-             list(snapshot.source_urls)),
+             list(snapshot.source_urls), snapshot.source_kind),
         ).fetchone()
         if inserted is None:
             (snapshot_id,) = cursor.execute(
@@ -63,7 +66,14 @@ def import_snapshot(connection: Connection, snapshot: Snapshot) -> ImportResult:
             VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT (program, plan_id, term_year, season) DO UPDATE
             SET snapshot_id = EXCLUDED.snapshot_id, observed_at = EXCLUDED.observed_at
-            WHERE EXCLUDED.observed_at >= active.observed_at
+            WHERE (
+                SELECT CASE
+                    WHEN old.source_kind = new.source_kind THEN EXCLUDED.observed_at >= active.observed_at
+                    ELSE new.source_kind = 'published'
+                END
+                FROM itu_snapshots old, itu_snapshots new
+                WHERE old.id = active.snapshot_id AND new.id = EXCLUDED.snapshot_id
+            )
             """,
             (*key, snapshot_id, snapshot.observed_at),
         )
