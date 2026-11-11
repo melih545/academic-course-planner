@@ -191,10 +191,13 @@ def collect_snapshot(fetch: Callable[[str], str] = fetch_public) -> Snapshot:
     for section in sections.values():
         if PROGRAM in (section.allowed_programs or ()) and section.quota and section.meetings:
             applicable.setdefault(section.course_code, []).append(section)
-    for code, candidates in applicable.items():
-        if code in rules or code == "ING 100":
-            continue
-        if all(section.no_prerequisite_reported for section in candidates):
+    required_codes = {
+        code for requirement in requirements if requirement.elective_group is None
+        for code in requirement.course_codes
+    }
+    for code in sorted((required_codes | applicable.keys()) - rules.keys() - {"ING 100"}):
+        candidates = applicable.get(code)
+        if candidates and all(section.no_prerequisite_reported for section in candidates):
             rules[code] = Rule(code, "", "", candidates[0].source_url)
         else:
             branch, number = code.split()
@@ -375,6 +378,17 @@ def _parse_course_rule(body: str, code: str, source: str) -> Rule | None:
             cells_by_label[label] = value
     course_rule = cells_by_label.get("Ders Önşartları")
     standing_rule = cells_by_label.get("Başarılan Kredi/Sınıf Önşartı")
+    if course_rule is None and standing_rule is None:
+        # ÖBS leaves the prerequisite table empty between the credits and equivalences tables.
+        for table in soup.select("table.table-bordered"):
+            if table.select_one("tr") is not None:
+                continue
+            previous = table.find_previous_sibling("table")
+            following = table.find_next_sibling("table")
+            if previous and following and _text(previous).startswith("Kredi AKTS") and (
+                _text(following).startswith(("Ders Denklikleri", "Ders Tanımı"))
+            ):
+                return Rule(code, "", "", source)
     if course_rule is None or standing_rule is None:
         return None
     return Rule(

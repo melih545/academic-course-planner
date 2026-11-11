@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from collections.abc import Callable
 from datetime import datetime
 from io import StringIO
@@ -13,6 +14,7 @@ from urllib.request import Request, urlopen
 from psycopg import Connection
 
 from .itu import (
+    DAYS,
     EMPTY,
     PLAN_ID,
     PLAN_URL,
@@ -38,6 +40,16 @@ ARCHIVE_TERMS = {
     "2025-2026-guz": "2025-2026 Güz Dönemi",
     "2025-2026-bahar": "2025-2026 Bahar Dönemi",
 }
+LAB_ARCHIVE_ROOT = (
+    "https://raw.githubusercontent.com/keepdying/itu-web-archive/"
+    "579fe1f54eabd04c3b0881fcfaf29232ef9f2ddf/public"
+)
+LAB_ARCHIVE_DATES = {
+    "2023-2024-bahar": "2024-04-15",
+    "2024-2025-bahar": "2025-05-14",
+    "2025-2026-bahar": "2026-04-15",
+}
+LAB_CODE = "FIZ 102EL"
 CSV_COLUMNS = {
     "CRN", "Ders Kodu", "Seviye", "Öğretim Yöntemi", "Öğretim Üyesi", "Bina", "Derslik",
     "Kontenjan", "Yazılan", "Alabilen Programlar", "Gün", "Saat",
@@ -121,11 +133,20 @@ def collect_archive(
     if count != expected_rows or not any(section.meetings and section.quota for section in sections.values()):
         raise SourceError(f"Incomplete archive export for {slug}")
 
+    sources = [PLAN_URL, metadata_url, sections_url]
+    if slug in LAB_ARCHIVE_DATES and LAB_CODE in codes:
+        lab_url = f"{LAB_ARCHIVE_ROOT}/{LAB_ARCHIVE_DATES[slug]}/FIZ.csv"
+        for section in _lab_sections(fetch(lab_url), legacy_code, lab_url):
+            if section.crn not in sections:
+                sections[section.crn] = section
+            elif sections[section.crn].course_code != section.course_code:
+                raise SourceError(f"Conflicting archive course for CRN {section.crn}: {lab_url}")
+        sources.append(lab_url)
     imported_codes = {section.course_code for section in sections.values()}
     return Snapshot(
         PROGRAM, PLAN_ID, plan_title, label, year, season, observed_at,
         tuple(course for course in courses if course.code in imported_codes), (), (),
-        tuple(sections[crn] for crn in sorted(sections)), (PLAN_URL, metadata_url, sections_url), "archive",
+        tuple(sections[crn] for crn in sorted(sections)), tuple(sources), "archive",
     )
 
 
@@ -152,3 +173,38 @@ def read_archive_curriculum(connection: Connection) -> tuple[str, tuple[Course, 
 
 def _locations(value: str) -> str:
     return " / ".join(dict.fromkeys(item for part in value.split("|") if (item := part.strip()) not in EMPTY))
+
+
+def _lab_sections(body: str, legacy_code: str, url: str) -> tuple[Section, ...]:
+    rows = csv.DictReader(StringIO(body.lstrip("\ufeff")), strict=True)
+    required = {"CRN", "Course Code", "Major Restriction", "Day", "Time", "Capacity", "Enrolled",
+                "Teaching Method", "Instructor", "Building", "Room"}
+    if not required <= set(rows.fieldnames or ()):
+        raise SourceError(f"Missing lab archive columns: {url}")
+    english_days = dict(zip(("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"), DAYS))
+    sections = {}
+    try:
+        for row in rows:
+            if row["Course Code"] != LAB_CODE:
+                continue
+            programs = set(re.split(r"[,;\s]+", row["Major Restriction"].strip()))
+            if legacy_code not in programs:
+                continue
+            programs.remove(legacy_code)
+            programs.add(PROGRAM)
+            crn = _count(row["CRN"])
+            if not crn:
+                raise SourceError(f"Missing lab CRN: {url}")
+            days = " ".join(english_days.get(day, day) for day in row["Day"].split())
+            times = re.sub(r"\b(\d{2})(\d{2})\b", r"\1:\2", row["Time"])
+            section = Section(
+                crn, LAB_CODE, row["Teaching Method"], row["Instructor"], row["Building"], row["Room"],
+                _count(row["Capacity"]), _count(row["Enrolled"]), tuple(sorted(programs)),
+                _meetings(days, times, crn), url,
+            )
+            _add_unique(sections, crn, section, "lab archive CRN")
+    except (TypeError, csv.Error) as error:
+        raise SourceError(f"Malformed lab archive: {url}") from error
+    if not any(section.meetings and section.quota for section in sections.values()):
+        raise SourceError(f"No eligible lab sections in {url}")
+    return tuple(sections.values())

@@ -101,6 +101,8 @@ def test_collect_preserves_plan_requirements_and_source_provenance():
         ),
     }
 
+    for number in ("101E", "103E", "104E", "105E", "106E", "107E", "108E", "108"):
+        sources[f"{itu.BASE}/public/DersBilgi/DersBilgiSearch?bransKodu=END&dersNo={number}"] = ""
     snapshot = itu.collect_snapshot(sources.__getitem__)
 
     assert (snapshot.program, snapshot.term_year, snapshot.season) == ("ENDE_LS", 2026, "Fall")
@@ -109,6 +111,16 @@ def test_collect_preserves_plan_requirements_and_source_provenance():
     assert snapshot.requirements[-2].unresolved_options == ("JPN — Japanese I",)
     assert snapshot.rules == (itu.Rule("END 102E", "END 101E MIN. DD", "2. sınıf", rules_url),)
     assert set(snapshot.source_urls) == set(sources)
+
+
+def test_course_detail_recognizes_an_explicit_empty_prerequisite_table():
+    detail = _table(("Ders Kodu",), [("END112 -END112E",)]) + """
+        <table class="table-bordered"><tr><td>Kredi</td><td>AKTS</td></tr></table>
+        <table class="table-bordered"><tbody></tbody></table>
+        <table class="table-bordered"><tr><td>Ders Denklikleri</td></tr></table>
+    """
+    assert itu._parse_course_rule(detail, "END 112E", "detail") == itu.Rule("END 112E", "", "", "detail")
+    assert itu._parse_course_rule(detail.replace("Ders Denklikleri", "Unknown"), "END 112E", "detail") is None
 
 
 def test_course_detail_fallback_requires_matching_course_and_explicit_rule_fields():

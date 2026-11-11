@@ -6,7 +6,7 @@ from io import StringIO
 
 import pytest
 
-from course_planner.ingestion.archive import CSV_COLUMNS, collect_archive
+from course_planner.ingestion.archive import CSV_COLUMNS, _lab_sections, collect_archive
 from course_planner.ingestion.itu import Meeting, SourceError
 from course_planner.ingestion.postgres import import_snapshot
 
@@ -63,3 +63,15 @@ def test_archive_import_is_idempotent_and_published_takes_precedence(database, s
     official = import_snapshot(database, published)
     assert official.active_snapshot_id == official.snapshot_id
     assert import_snapshot(database, archive).active_snapshot_id == official.snapshot_id
+
+
+def test_lab_archive_restores_eligible_section_with_legacy_times():
+    csv_text = (
+        'CRN,Course Code,Major Restriction,Day,Time,Capacity,Enrolled,Teaching Method,Instructor,Building,Room\n'
+        '20528,FIZ 102EL,"END, ENDE",Pazartesi,0930/1129,30,25,,Instructor,BINA,101\n'
+        '20529,FIZ 102EL,END,Pazartesi,0930/1129,30,25,,Instructor,BINA,101\n'
+    )
+    (section,) = _lab_sections(csv_text, "ENDE", "source")
+    assert section.crn == 20528
+    assert "ENDE_LS" in section.allowed_programs
+    assert section.meetings == (Meeting(0, 570, 689),)
