@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
+import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Literal
 
@@ -21,6 +22,7 @@ from .ingestion.itu import DAYS, ING100_ELIGIBILITY, PLAN_ID, PROGRAM
 from .schedule import Meeting, Section, Term
 
 Evidence = Literal["published", "archive", "forecast", "missing"]
+ADVISOR_PROJECTS = {"END 4901E", "END 4902E"}
 
 
 class DataUnavailable(ValueError):
@@ -136,16 +138,22 @@ def load_planning_data(
     courses = {}
     labels = {}
     for code, title, credits, rule_text, standing in course_rows:
+        minimum_credits = 0.0
+        standing = (standing or "").strip()
         if rule_text is None:
             text = "No prerequisite evidence in the imported sources."
             rule = UnresolvedPrerequisite(text)
-        elif standing and standing.strip() not in {"-", "Yok"}:
+        elif re.fullmatch(r"[0-9]+(?:[,.][0-9]+)?", standing):
+            minimum_credits = float(standing.replace(",", "."))
+            text = " / ".join(part for part in (rule_text, f"{minimum_credits:g} earned credits") if part)
+            rule = parse_prerequisite(rule_text)
+        elif standing not in {"", "-", "Yok"}:
             text = " / ".join(part for part in (rule_text, standing) if part)
             rule = UnresolvedPrerequisite(text)
         else:
             text = rule_text
             rule = parse_prerequisite(rule_text)
-        courses[code] = Course("Main" if code in required else "Elective", rule, text, float(credits))
+        courses[code] = Course("Main" if code in required else "Elective", rule, text, float(credits), minimum_credits)
         labels[code] = title
     if not groups or not courses:
         raise DataUnavailable("The selected snapshot has no usable curriculum.")
@@ -159,7 +167,10 @@ def load_planning_data(
     for section_id, row in enumerate(section_rows, start=1):
         snapshot_id, crn, code, instructor, building, room, source_url, programs, quota = row
         term = term_by_id[snapshot_id]
-        if programs is None or (PROGRAM in programs and (quota is None or (quota > 0 and not slots[snapshot_id, crn]))):
+        meeting_rows_for_section = slots[snapshot_id, crn]
+        # These ENDE_LS projects are arranged with an advisor according to the department's project guide.
+        advisor_arranged = code in ADVISOR_PROJECTS and not meeting_rows_for_section
+        if programs is None or (PROGRAM in programs and (quota is None or (quota > 0 and not meeting_rows_for_section and not advisor_arranged))):
             incomplete[term].add(code)
             continue
         if PROGRAM not in programs or not quota:
@@ -167,9 +178,11 @@ def load_planning_data(
         location = " ".join(value for value in (building, room) if value not in {"", "-", "--"})
         meetings = tuple(
             Meeting(DAYS[weekday], start, end, location)
-            for weekday, start, end in slots[snapshot_id, crn]
+            for weekday, start, end in meeting_rows_for_section
         )
-        sections[term].append(Section(section_id, code, term.season, meetings, instructor, term, crn, source_url))
+        sections[term].append(Section(
+            section_id, code, term.season, meetings, instructor, term, crn, source_url, advisor_arranged
+        ))
 
     return PlanningData(snapshots, Curriculum(courses, {}, groups), labels, {
         term: tuple(items) for term, items in sections.items()
@@ -183,6 +196,6 @@ def verified_curriculum(curriculum: Curriculum, english_eligible: bool) -> Curri
     if course.prerequisite_text != ING100_ELIGIBILITY:
         return curriculum
     return Curriculum(
-        {**curriculum.courses, "ING 100": Course(course.category, None, course.prerequisite_text, course.credits)},
+        {**curriculum.courses, "ING 100": replace(course, prerequisite=None)},
         curriculum.elective_minimums, curriculum.requirement_groups,
     )

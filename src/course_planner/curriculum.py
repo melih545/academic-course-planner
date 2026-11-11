@@ -124,6 +124,7 @@ class Course:
     prerequisite: Prerequisite | None
     prerequisite_text: str
     credits: float = 0
+    minimum_earned_credits: float = 0
 
 
 @dataclass(frozen=True)

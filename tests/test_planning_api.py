@@ -106,6 +106,30 @@ def test_term_schedule_does_not_use_forecast_sections():
     assert result.options == []
 
 
+def test_partial_graduation_preserves_standing_and_returns_eligible_courses():
+    data = _data()
+    restricted = "END 449"
+    data.curriculum.courses[restricted] = Course("Main", None, "3 earned credits", 0, 3)
+    data.curriculum = Curriculum(
+        data.curriculum.courses, {},
+        (*data.curriculum.requirement_groups, RequirementGroup("Seminar", (restricted,))),
+    )
+    data.sections[FALL] += (Section(2, restricted, "Fall", (), "", FALL, 54321),)
+    payload = {**_payload(FALL), "allow_partial": True}
+
+    partial = planning_api.solve_plan(data, planning_api.PlanInput.model_validate(payload))
+    assert partial.status == "partial"
+    assert {section.code for section in partial.options[0]} == {CODES[0]}
+    assert partial.issues[0].code == "prerequisite_unmet"
+
+    data.curriculum.courses["BIL 100E"] = Course("Main", None, "", 3)
+    eligible = planning_api.solve_plan(data, planning_api.PlanInput.model_validate({
+        **payload, "completed_grades": {"BIL 100E": "DD"},
+    }))
+    assert eligible.status == "solved"
+    assert {section.code for section in eligible.options[0]} == {CODES[0], restricted}
+
+
 def test_streamlit_published_mode_plans_a_term_with_no_completed_courses(monkeypatch):
     import httpx
     from streamlit.testing.v1 import AppTest

@@ -66,6 +66,7 @@ class PlanInput(BaseModel):
     allow_summer: bool = True
     english_eligible: bool = False
     planning_goal: Literal["graduation", "term"] = "graduation"
+    allow_partial: bool = False
 
     @model_validator(mode="after")
     def validate_window(self) -> PlanInput:
@@ -100,7 +101,7 @@ class TermCoverage(BaseModel):
 
 
 class PlanResponse(BaseModel):
-    status: Literal["solved", "infeasible", "time_limit", "interrupted"]
+    status: Literal["solved", "partial", "infeasible", "time_limit", "interrupted"]
     options: list[list[ScheduledSection]]
     issues: tuple[PlanIssue, ...]
     coverage: list[TermCoverage]
@@ -149,7 +150,10 @@ def _solve_plan(data: PlanningData, payload: PlanInput) -> PlanResponse:
     incomplete_courses = set()
     for term in request.terms():
         evidence, snapshot, sections = data.sections_for(term, published_only=request.planning_goal == "term")
-        offerings[term] = sections
+        offerings[term] = (
+            tuple(section for section in sections if not section.advisor_arranged)
+            if request.planning_goal == "term" else sections
+        )
         if evidence == "published":
             published.add(term)
         if snapshot:
@@ -164,6 +168,7 @@ def _solve_plan(data: PlanningData, payload: PlanInput) -> PlanResponse:
     result = generate_schedule_options(
         (), request, curriculum=curriculum, confirmed_courses=payload.confirmed_courses,
         offerings=offerings, published_terms=published, incomplete_courses=incomplete_courses,
+        allow_partial=payload.allow_partial,
     )
     groups = curriculum.requirement_groups
     completed = set(payload.completed_grades)

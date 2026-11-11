@@ -54,6 +54,7 @@ class Section:
     published_term: Term | None = None
     crn: int | None = None
     source_url: str | None = None
+    advisor_arranged: bool = False
 
 
 @dataclass(frozen=True)

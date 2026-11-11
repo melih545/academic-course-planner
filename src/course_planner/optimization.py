@@ -31,7 +31,7 @@ except ModuleNotFoundError:
 class PlanResult:
     options: list[list[ScheduledSection]]
     issues: tuple[str, ...] = ()
-    status: Literal["solved", "infeasible", "time_limit", "interrupted"] = "solved"
+    status: Literal["solved", "partial", "infeasible", "time_limit", "interrupted"] = "solved"
     diagnostics: tuple[PlanIssue, ...] = ()
 
 
@@ -52,6 +52,7 @@ def generate_schedule_options(
     offerings: Mapping[Term, Sequence[Section]] | None = None,
     published_terms: Set[Term] = frozenset(),
     incomplete_courses: Set[str] = frozenset(),
+    allow_partial: bool = False,
 ) -> PlanResult:
     if Model is None:
         raise RuntimeError(
@@ -82,9 +83,14 @@ def generate_schedule_options(
     # A course can be a prerequisite only after an earlier term. This pass
     # checks optimistic reachability before asking SCIP to resolve conflicts.
     prior_codes = set(confirmed_courses)
+    credits_by_code = {code: course.credits for code, course in curriculum.courses.items()}
+    completed_credits = sum(credits_by_code.get(code, 0) for code in completed_codes)
     offered = set()
     candidates_by_term = {}
     for term in terms:
+        reachable_credits = completed_credits + sum(
+            credits_by_code[code] for code in prior_codes - completed_codes
+        )
         offered_sections = sections_by_season[term.season] if offerings is None else [
             section for section in offerings.get(term, ())
             if section.code in curriculum.courses and section.code not in completed_codes
@@ -93,7 +99,8 @@ def generate_schedule_options(
         candidates = [
             ScheduledSection(section, term)
             for section in offered_sections
-            if can_satisfy(
+            if reachable_credits >= curriculum.courses[section.code].minimum_earned_credits
+            and can_satisfy(
                 curriculum.courses[section.code].prerequisite,
                 lambda rule: rule.code in prior_codes or rule.is_met_by(completed_grades),
             )
@@ -102,9 +109,9 @@ def generate_schedule_options(
         prior_codes.update(section.code for section in candidates)
 
     eligible = prior_codes - confirmed_courses
+    diagnostics = []
     if groups and (not term_schedule or not eligible):
         matched = matched_requirements(groups, eligible | completed_codes)
-        diagnostics = []
         for index, group in enumerate(groups):
             if index in matched:
                 continue
@@ -127,8 +134,10 @@ def generate_schedule_options(
                 diagnostics.append(PlanIssue("data_missing", f"{title}: section or elective coverage is incomplete."))
             else:
                 diagnostics.append(PlanIssue("section_not_offered", f"{title}: no eligible published section in this window."))
-        if diagnostics:
+        if diagnostics and (term_schedule or not allow_partial or not eligible):
             return PlanResult([], tuple(item.message for item in diagnostics), "infeasible", tuple(diagnostics))
+    partial = bool(diagnostics)
+    relaxed_requirements = term_schedule or partial
 
     courses_with_sections = {
         section.code for season in sections_by_season.values() for section in season
@@ -191,14 +200,14 @@ def generate_schedule_options(
                     matches_by_code[code].append(match)
                     if term_schedule and code not in completed_codes:
                         prioritized_matches.append((group.semester, match))
-            if term_schedule:
+            if relaxed_requirements:
                 model.addCons(quicksum(matches) <= 1)
             else:
                 model.addCons(quicksum(matches) == 1)
         for code, matches in matches_by_code.items():
             available = 1 if code in completed_codes else quicksum(vars_by_code[code])
             model.addCons(quicksum(matches) <= available)
-        if term_schedule:
+        if relaxed_requirements:
             for code, variables in vars_by_code.items():
                 model.addCons(quicksum(variables) <= quicksum(matches_by_code[code]))
     for category, deficit in deficits.items():
@@ -212,10 +221,6 @@ def generate_schedule_options(
                 ) >= deficit
             )
 
-    candidate_sections = {
-        scheduled.section for candidates in candidates_by_term.values() for scheduled in candidates
-    }
-    conflicts = _section_conflicts(candidate_sections)
     used_terms = {}
     prior_vars = defaultdict(list)
     for term, candidates in candidates_by_term.items():
@@ -228,9 +233,8 @@ def generate_schedule_options(
                 curriculum.courses[section.code].credits * section_vars[section]
                 for section in candidates
             ) <= request.max_credits)
-        for first, second in conflicts[term.season]:
-            if first in term_vars and second in term_vars:
-                model.addCons(term_vars[first] + term_vars[second] <= 1)
+        for overlapping in _overlapping_sections([scheduled.section for scheduled in candidates]):
+            model.addCons(quicksum(term_vars[section_id] for section_id in overlapping) <= 1)
 
         def prior_support(rule: MinimumGrade) -> bool | Expr:
             if rule.code in confirmed_courses or rule.is_met_by(completed_grades):
@@ -245,6 +249,18 @@ def generate_schedule_options(
             support = _rule_support(model, curriculum.courses[code].prerequisite, prior_support)
             if support is not True:
                 model.addCons(quicksum(variables) <= support)
+        credit_requirements = [
+            (code, variables) for code, variables in vars_by_term_code.items()
+            if curriculum.courses[code].minimum_earned_credits > completed_credits
+        ]
+        if credit_requirements:
+            earlier_credits = quicksum(
+                credits_by_code[code] * variable for code, variables in prior_vars.items()
+                for variable in variables
+            )
+            for code, variables in credit_requirements:
+                needed = curriculum.courses[code].minimum_earned_credits - completed_credits
+                model.addCons(needed * quicksum(variables) <= earlier_credits)
         for code, variables in vars_by_term_code.items():
             prior_vars[code].extend(variables)
 
@@ -260,6 +276,13 @@ def generate_schedule_options(
             (8 * TERM_COURSE_LIMIT + 1)
             * (quicksum(section_vars.values()) - (TERM_COURSE_LIMIT + 1) * matches)
             - earlier_requirements
+        )
+    elif partial:
+        term_order = {term: index for index, term in enumerate(terms, start=1)}
+        matches = quicksum(match for assignments in matches_by_code.values() for match in assignments)
+        objective = (
+            quicksum(term_order[section.term] * var for section, var in section_vars.items())
+            - (len(terms) * len(groups) + 1) * matches
         )
     else:
         objective = (
@@ -278,7 +301,7 @@ def generate_schedule_options(
     for index in range(max_solutions):
         remaining = deadline - monotonic()
         if remaining <= 0:
-            return PlanResult(options, status="time_limit")
+            return PlanResult(options, status="time_limit", diagnostics=tuple(diagnostics))
         model.setRealParam("limits/time", remaining)
         model.optimize()
         status = model.getStatus()
@@ -291,18 +314,22 @@ def generate_schedule_options(
                 section for section, variable in section_vars.items()
                 if model.getSolVal(solution, variable) > 0.5
             ]
-            if selected or not term_schedule:
+            if selected or not relaxed_requirements:
                 options.append(selected)
         if status == "timelimit":
-            return PlanResult(options, status="time_limit")
+            return PlanResult(options, status="time_limit", diagnostics=tuple(diagnostics))
         if status != "optimal":
-            return PlanResult(options, status="interrupted")
+            return PlanResult(options, status="interrupted", diagnostics=tuple(diagnostics))
+        if partial:
+            break
         if not selected or index + 1 == max_solutions:
             break
         model.freeTransform()
         model.addCons(quicksum(section_vars[section] for section in selected) <= len(selected) - 1)
 
     if not options:
+        if partial:
+            return PlanResult([], status="infeasible", diagnostics=tuple(diagnostics))
         if term_schedule:
             return PlanResult([], ("No eligible courses fit this term and the selected limits.",), "infeasible")
         credit_rule = (
@@ -314,7 +341,7 @@ def generate_schedule_options(
              f"elective requirements, and ten-course limit{credit_rule} per term in this window.",),
             "infeasible",
         )
-    return PlanResult(options)
+    return PlanResult(options, status="partial" if partial else "solved", diagnostics=tuple(diagnostics))
 
 
 def _prerequisite_issue(curriculum: Curriculum, code: str) -> str:
@@ -356,22 +383,19 @@ def _rule_support(
     return satisfied
 
 
-def _section_conflicts(sections: Set[Section]) -> dict[str, set[tuple[int, int]]]:
-    meetings_by_day = defaultdict(list)
+def _overlapping_sections(sections: Sequence[Section]) -> set[tuple[int, ...]]:
+    starts_by_day = defaultdict(lambda: defaultdict(list))
     for section in sections:
         for meeting in section.meetings:
-            meetings_by_day[section.season, meeting.day].append((meeting, section))
+            starts_by_day[meeting.day][meeting.start_minute].append((section.id, meeting.end_minute))
 
-    conflicts = defaultdict(set)
-    for (season, _), meetings in meetings_by_day.items():
-        active = []
-        for meeting, section in sorted(meetings, key=lambda pair: pair[0].start_minute):
-            active = [
-                (end, other) for end, other in active
-                if end > meeting.start_minute
-            ]
-            for _, other in active:
-                if other.code != section.code:
-                    conflicts[season].add(tuple(sorted((section.id, other.id))))
-            active.append((meeting.end_minute, section))
+    conflicts = set()
+    for starts in starts_by_day.values():
+        active: dict[int, int] = {}
+        for start, meetings in sorted(starts.items()):
+            active = {section_id: end for section_id, end in active.items() if end > start}
+            for section_id, end in meetings:
+                active[section_id] = max(end, active.get(section_id, end))
+            if len(active) > 1:
+                conflicts.add(tuple(sorted(active)))
     return conflicts

@@ -288,6 +288,7 @@ def render_published_planner(api_url: str) -> None:
             "confirmed_courses": sorted(session.confirmed_codes),
             "snapshot_ids": ids,
             "english_eligible": english_eligible,
+            "allow_partial": not term_schedule,
         }
         with st.spinner("Calculating against the selected data version..."):
             try:
@@ -311,10 +312,12 @@ def render_published_planner(api_url: str) -> None:
         issues = "\n".join(f"- **{item.code}** · {item.message}" for item in result.issues)
         if term_schedule:
             st.warning("No eligible courses could be scheduled for this term with the selected limits.")
-            with st.expander("See course and data details"):
-                st.markdown(issues)
+        elif result.options:
+            st.warning("Showing a partial graduation plan. Some requirements still need to be resolved.")
         else:
-            st.warning(f"No complete plan fits this window.\n\n{issues}")
+            st.warning("No graduation schedule could be generated for this window.")
+        with st.expander("See course and data details"):
+            st.markdown(issues)
     elif result.status in {"time_limit", "interrupted"}:
         if result.options:
             st.warning("The search ended early. The schedules below meet the selected constraints.")
@@ -542,8 +545,9 @@ def render_schedule_options(
     ):
         confirmed = session.confirm(term_options[selected_option])
         st.session_state.planner = confirmed
-        if session.request.planning_goal == "graduation" and isinstance(st.session_state.result, PlanResponse):
-            st.session_state.published_requirements_met = all(
+        result = st.session_state.result
+        if session.request.planning_goal == "graduation" and isinstance(result, PlanResponse):
+            st.session_state.published_requirements_met = not result.issues and all(
                 section.term == current_term for section in options[selected_option]
             )
         st.session_state.result = None
@@ -568,6 +572,8 @@ def show_option(
     else:
         st.info("No courses scheduled for this term.")
     if by_term:
+        if any(section.section.advisor_arranged for section in option):
+            st.caption("Design projects with no published weekly time are arranged with an advisor.")
         st.table([
             {
                 "Term": str(term),
